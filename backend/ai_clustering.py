@@ -29,6 +29,9 @@ _circuit_open_until: Optional[float] = None
 _model = None
 
 
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+
+
 def _get_client():
     """Initialise et retourne le client Gemini (lazy init)."""
     global _model
@@ -144,21 +147,19 @@ Format attendu :
 Titres à analyser :
 {titles_numbered}"""
 
-    for attempt in range(2):  # 1 essai + 1 retry
+    for attempt in range(3):  # jusqu'à 3 tentatives
         try:
             client = _get_client()
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=GEMINI_MODEL,
                 contents=prompt,
             )
             raw = _strip_markdown(response.text)
-
             clusters = json.loads(raw)
 
             if not isinstance(clusters, list):
                 raise ValueError("La réponse n'est pas un tableau JSON")
 
-            # Valider la structure minimale
             validated = []
             for c in clusters:
                 if isinstance(c, dict) and "model_name" in c and "indices" in c:
@@ -176,28 +177,31 @@ Titres à analyser :
             return validated
 
         except json.JSONDecodeError as e:
-            if attempt == 0:
-                logger.warning("Réponse Gemini non-JSON, retry avec prompt de correction: %s", e)
+            if attempt < 2:
+                logger.warning("Réponse Gemini non-JSON, retry: %s", e)
                 prompt = (
                     "Ta réponse précédente n'était pas un JSON valide. "
                     "Réponds UNIQUEMENT avec le tableau JSON, sans aucun autre texte.\n\n"
                     + prompt
                 )
             else:
-                log_to_db(
-                    "ERROR", "ai_clustering",
-                    f"Parsing JSON Gemini échoué après retry: {e}",
-                    {"raw_response": response.text[:500] if 'response' in dir() else ""},
-                )
+                log_to_db("ERROR", "ai_clustering",
+                          f"Parsing JSON Gemini échoué après {attempt+1} essais: {e}",
+                          {"raw_snippet": locals().get("raw", "")[:300]})
                 _record_error()
                 return []
 
         except Exception as e:
-            log_to_db(
-                "ERROR", "ai_clustering",
-                f"Erreur appel Gemini: {e}",
-                {"attempt": attempt},
-            )
+            err_str = str(e)
+            # 503 = surcharge temporaire — ne pas ouvrir le circuit breaker, juste retry
+            if "503" in err_str and attempt < 2:
+                wait = (attempt + 1) * 8
+                logger.warning("Gemini 503 surcharge, retry dans %ds (essai %d/3)", wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            log_to_db("ERROR", "ai_clustering",
+                      f"Erreur appel Gemini: {e}",
+                      {"attempt": attempt, "model": GEMINI_MODEL})
             _record_error()
             return []
 

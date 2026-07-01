@@ -144,6 +144,67 @@ def get_logs(
     return _get_logs(level, limit, db)
 
 
+@app.get("/api/debug/scrape")
+def debug_scrape(q: str = "lemaire", db: Session = Depends(get_db)):
+    """
+    Diagnostic : teste une requête Vinted brute et retourne le statut HTTP,
+    les headers Cloudflare, et les premiers résultats (max 3).
+    Ne jamais appeler en boucle — délai anti-bot inclus.
+    """
+    import time, random
+    from curl_cffi.requests import Session as CurlSession
+
+    base_url = os.environ.get("VINTED_BASE_URL", "https://www.vinted.fr")
+    result: dict = {"base_url": base_url, "query": q}
+
+    # Étape 1 : fetch du cookie anonyme
+    session = CurlSession(impersonate="chrome")
+    try:
+        r0 = session.get(
+            base_url + "/",
+            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                     "Accept-Language": "fr-FR,fr;q=0.9"},
+            timeout=15,
+        )
+        result["cookie_fetch_status"] = r0.status_code
+        result["cookie_names"] = list(r0.cookies.keys())
+        result["has_access_token"] = "access_token_web" in r0.cookies
+    except Exception as e:
+        result["cookie_fetch_error"] = str(e)
+        return result
+
+    # Étape 2 : requête API
+    time.sleep(random.uniform(2.0, 3.5))
+    try:
+        r1 = session.get(
+            f"{base_url}/api/v2/catalog/items",
+            params={"search_text": q, "per_page": 5, "page": 1},
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+                "Referer": f"{base_url}/catalog",
+                "Origin": base_url,
+            },
+            timeout=20,
+        )
+        result["api_status"] = r1.status_code
+        result["cf_mitigated"] = r1.headers.get("cf-mitigated", "")
+        result["cf_ray"] = r1.headers.get("cf-ray", "")
+        result["content_type"] = r1.headers.get("content-type", "")
+        if r1.status_code == 200:
+            data = r1.json()
+            items = data.get("items") or []
+            result["items_count"] = len(items)
+            result["sample_titles"] = [i.get("title") for i in items[:3]]
+        else:
+            result["body_snippet"] = r1.text[:400]
+    except Exception as e:
+        result["api_error"] = str(e)
+
+    log_to_db("INFO", "debug", "Debug scrape exécuté", result)
+    return result
+
+
 @app.post("/api/admin/warmup", status_code=202)
 async def warmup(
     body: dict,

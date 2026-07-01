@@ -47,10 +47,9 @@ def get_price_history(model_id: int, db: Session = Depends(get_db)):
             """
             SELECT
                 ph.recorded_at,
-                ROUND(ph.old_price::numeric, 0) AS old_price,
-                ROUND(ph.new_price::numeric, 0) AS new_price,
+                ROUND(ph.price::numeric, 0) AS price,
                 l.title,
-                l.item_condition
+                l.item_status
             FROM price_history ph
             JOIN listings l ON l.id = ph.listing_id
             WHERE l.product_model_id = :mid

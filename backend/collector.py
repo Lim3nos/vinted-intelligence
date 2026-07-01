@@ -210,27 +210,35 @@ def safe_request(params: dict, max_retries: int = 3) -> Optional[list]:
                 items = data.get("items") or []
                 return items if items else RESULT_EMPTY
 
+            # Capturer les détails pour diagnostic (Cloudflare, blocage IP, etc.)
+            cf_header = resp.headers.get("cf-mitigated", "")
+            body_snippet = resp.text[:300] if hasattr(resp, "text") else ""
+            log_to_db(
+                "WARNING", "collector",
+                f"Réponse Vinted inattendue status={resp.status_code}",
+                {
+                    "attempt": attempt,
+                    "status": resp.status_code,
+                    "cf_mitigated": cf_header,
+                    "body_snippet": body_snippet,
+                    "params": {k: v for k, v in params.items() if k != "page"},
+                },
+            )
+
             if resp.status_code in (401, 403):
-                logger.warning(
-                    "Blocage Vinted %d tentative %d/%d — renouvellement cookie",
-                    resp.status_code, attempt + 1, max_retries,
-                )
-                log_to_db(
-                    "WARNING", "collector",
-                    f"Blocage Vinted {resp.status_code}",
-                    {"attempt": attempt, "params": str(params)},
-                )
-                # Forcer le renouvellement du cookie
                 global _cookie_fetched_at
                 _cookie_fetched_at = None
                 if attempt < max_retries - 1:
                     time.sleep((2 ** attempt) * 10)
             else:
-                logger.error("Erreur Vinted inattendue status %d", resp.status_code)
                 return RESULT_ERROR
 
         except Exception as e:
-            logger.error("Erreur réseau tentative %d/%d: %s", attempt + 1, max_retries, e)
+            log_to_db(
+                "ERROR", "collector",
+                f"Erreur réseau tentative {attempt + 1}/{max_retries}: {e}",
+                {"attempt": attempt},
+            )
             if attempt < max_retries - 1:
                 time.sleep((2 ** attempt) * 5)
 
