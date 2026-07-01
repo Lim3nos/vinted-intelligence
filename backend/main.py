@@ -108,16 +108,9 @@ def health(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/api/health/logs")
-def get_logs(
-    level: str = "INFO",
-    limit: int = Query(50, le=200),
-    db: Session = Depends(get_db),
-):
+def _get_logs(level: str, limit: int, db: Session):
     valid_levels = {"INFO", "WARNING", "ERROR", "CRITICAL"}
-    if level.upper() not in valid_levels:
-        level = "INFO"
-
+    level = level.upper() if level.upper() in valid_levels else "INFO"
     rows = db.execute(
         text(
             """
@@ -128,9 +121,27 @@ def get_logs(
             LIMIT :limit
             """
         ),
-        {"level": level.upper(), "limit": limit},
+        {"level": level, "limit": limit},
     ).fetchall()
     return [dict(r._mapping) for r in rows]
+
+
+@app.get("/api/health/logs")
+def get_health_logs(
+    level: str = "INFO",
+    limit: int = Query(50, le=200),
+    db: Session = Depends(get_db),
+):
+    return _get_logs(level, limit, db)
+
+
+@app.get("/api/logs")
+def get_logs(
+    level: str = "INFO",
+    limit: int = Query(50, le=200),
+    db: Session = Depends(get_db),
+):
+    return _get_logs(level, limit, db)
 
 
 @app.post("/api/admin/warmup", status_code=202)

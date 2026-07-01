@@ -13,18 +13,31 @@ router = APIRouter(prefix="/api/price", tags=["price"])
 
 class PriceRequest(BaseModel):
     product_model_id: int
-    item_status: str
+    my_item_status: str
 
 
-@router.post("/suggest")
-def get_price_suggestion(body: PriceRequest, db: Session = Depends(get_db)):
+def _do_suggest(model_id: int, status: str, db: Session):
     model = db.execute(
         text("SELECT id FROM product_models WHERE id = :mid"),
-        {"mid": body.product_model_id},
+        {"mid": model_id},
     ).fetchone()
     if not model:
         raise HTTPException(404, "Modèle introuvable")
-    return suggest_price(body.product_model_id, body.item_status, db)
+    return suggest_price(model_id, status, db)
+
+
+@router.post("/suggest")
+def post_price_suggestion(body: PriceRequest, db: Session = Depends(get_db)):
+    return _do_suggest(body.product_model_id, body.my_item_status, db)
+
+
+@router.get("/suggest")
+def get_price_suggestion(
+    model_id: int,
+    status: str = "Très bon état",
+    db: Session = Depends(get_db),
+):
+    return _do_suggest(model_id, status, db)
 
 
 @router.get("/history/{model_id}")
@@ -32,11 +45,17 @@ def get_price_history(model_id: int, db: Session = Depends(get_db)):
     rows = db.execute(
         text(
             """
-            SELECT ph.price, ph.recorded_at, l.title, l.item_status
+            SELECT
+                ph.recorded_at,
+                ROUND(ph.old_price::numeric, 0) AS old_price,
+                ROUND(ph.new_price::numeric, 0) AS new_price,
+                l.title,
+                l.item_condition
             FROM price_history ph
             JOIN listings l ON l.id = ph.listing_id
             WHERE l.product_model_id = :mid
-            ORDER BY ph.recorded_at DESC LIMIT 200
+            ORDER BY ph.recorded_at DESC
+            LIMIT 200
             """
         ),
         {"mid": model_id},
