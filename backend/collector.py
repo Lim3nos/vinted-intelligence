@@ -316,6 +316,28 @@ def _detect_brand_in_title(title_normalized: str, brand: Optional[str]) -> bool:
     return False
 
 
+def _match_model(title_normalized: str, models: list) -> Optional[int]:
+    """
+    Retourne l'id du product_model dont tous les keywords_rules sont présents
+    dans le titre normalisé. En cas de plusieurs matchs, choisit le plus spécifique
+    (celui avec le plus de keywords). Retourne None si aucun match.
+    """
+    best_id: Optional[int] = None
+    best_count = 0
+
+    for m in models:
+        keywords = m.keywords_rules or []
+        if not keywords:
+            continue
+        # Tous les keywords doivent être présents dans le titre
+        if all(kw.lower() in title_normalized for kw in keywords):
+            if len(keywords) > best_count:
+                best_count = len(keywords)
+                best_id = m.id
+
+    return best_id
+
+
 # ---------------------------------------------------------------------------
 # Snapshot complet
 # ---------------------------------------------------------------------------
@@ -354,6 +376,15 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         f"Snapshot démarré — recherche #{search_id} '{search.name}'",
         {"search_id": search_id},
     )
+
+    # 1b. Charger les product_models actifs de cette recherche pour le matching
+    active_models = db.execute(
+        text(
+            "SELECT id, keywords_rules FROM product_models "
+            "WHERE search_id = :sid AND is_active = true"
+        ),
+        {"sid": search_id},
+    ).fetchall()
 
     # 2. Construire les paramètres de scraping
     scraper_params = {}
@@ -435,6 +466,9 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                 {"vid": vinted_id},
             ).fetchone()
 
+            # Matching vers un product_model
+            matched_model_id = _match_model(title_norm, active_models)
+
             if not existing:
                 # Déduplication avant insertion
                 if is_duplicate(item, db):
@@ -446,14 +480,16 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                     text(
                         """
                         INSERT INTO listings (
-                            vinted_id, search_id, title, title_normalized, price,
+                            vinted_id, search_id, product_model_id,
+                            title, title_normalized, price,
                             brand, brand_in_title, item_status,
                             seller_id, seller_login, seller_total_sales, seller_feedback_score,
                             url, photo_url,
                             first_seen_at, last_seen_at, consecutive_absences,
                             published_hour_utc, published_day_of_week
                         ) VALUES (
-                            :vinted_id, :search_id, :title, :title_norm, :price,
+                            :vinted_id, :search_id, :model_id,
+                            :title, :title_norm, :price,
                             :brand, :brand_in_title, :item_status,
                             :seller_id, :seller_login, :seller_total_sales, :seller_feedback_score,
                             :url, :photo_url,
@@ -464,6 +500,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                     ),
                     {
                         "vinted_id": vinted_id, "search_id": search_id,
+                        "model_id": matched_model_id,
                         "title": title, "title_norm": title_norm, "price": price,
                         "brand": brand_name, "brand_in_title": brand_in_title,
                         "item_status": item_status,
@@ -501,15 +538,18 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                 listing_id = existing.id
 
                 # e. Annonce existante : mettre à jour last_seen_at + snapshot favoris
+                # Si pas encore rattachée à un modèle, tenter le matching maintenant
                 db.execute(
                     text(
                         """
                         UPDATE listings
-                        SET last_seen_at = :now, consecutive_absences = 0
+                        SET last_seen_at = :now,
+                            consecutive_absences = 0,
+                            product_model_id = COALESCE(product_model_id, :model_id)
                         WHERE id = :lid
                         """
                     ),
-                    {"now": now_utc, "lid": listing_id},
+                    {"now": now_utc, "lid": listing_id, "model_id": matched_model_id},
                 )
                 db.execute(
                     text(

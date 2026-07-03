@@ -144,6 +144,55 @@ def get_logs(
     return _get_logs(level, limit, db)
 
 
+@app.post("/api/admin/rematch-listings", status_code=202)
+def rematch_listings(db: Session = Depends(get_db)):
+    """
+    Rattache rétroactivement les listings sans product_model_id aux modèles actifs
+    en appliquant les keywords_rules. À appeler après avoir validé de nouveaux clusters.
+    """
+    from collector import _match_model
+
+    models = db.execute(
+        text("SELECT id, search_id, keywords_rules FROM product_models WHERE is_active = true")
+    ).fetchall()
+
+    # Grouper les modèles par search_id pour limiter les comparaisons
+    from collections import defaultdict
+    models_by_search: dict = defaultdict(list)
+    for m in models:
+        models_by_search[m.search_id].append(m)
+
+    # Listings sans model_id
+    listings = db.execute(
+        text(
+            "SELECT id, search_id, title_normalized FROM listings "
+            "WHERE product_model_id IS NULL AND title_normalized IS NOT NULL"
+        )
+    ).fetchall()
+
+    matched = 0
+    for listing in listings:
+        candidates = models_by_search.get(listing.search_id, [])
+        if not candidates:
+            continue
+        model_id = _match_model(listing.title_normalized, candidates)
+        if model_id:
+            db.execute(
+                text("UPDATE listings SET product_model_id = :mid WHERE id = :lid"),
+                {"mid": model_id, "lid": listing.id},
+            )
+            matched += 1
+
+    db.commit()
+
+    log_to_db(
+        "INFO", "api",
+        f"Rematch listings : {matched}/{len(listings)} rattachés",
+        {"matched": matched, "total_unmatched": len(listings)},
+    )
+    return {"matched": matched, "total_unmatched": len(listings)}
+
+
 @app.get("/api/debug/scrape")
 def debug_scrape(q: str = "lemaire", db: Session = Depends(get_db)):
     """
