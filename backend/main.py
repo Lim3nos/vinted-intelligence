@@ -144,6 +144,18 @@ def get_logs(
     return _get_logs(level, limit, db)
 
 
+@app.get("/api/admin/debug-models")
+def debug_models(db: Session = Depends(get_db)):
+    """Debug: vérifie le type de keywords_rules retourné par psycopg2."""
+    rows = db.execute(
+        text("SELECT id, name, keywords_rules FROM product_models WHERE is_active = true LIMIT 5")
+    ).fetchall()
+    return [
+        {"id": r.id, "name": r.name, "keywords_type": type(r.keywords_rules).__name__, "keywords": r.keywords_rules}
+        for r in rows
+    ]
+
+
 @app.post("/api/admin/rematch-listings", status_code=202)
 def rematch_listings(db: Session = Depends(get_db)):
     """
