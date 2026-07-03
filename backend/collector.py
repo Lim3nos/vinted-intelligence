@@ -322,11 +322,20 @@ def _match_model(title_normalized: str, models: list) -> Optional[int]:
     dans le titre normalisé. En cas de plusieurs matchs, choisit le plus spécifique
     (celui avec le plus de keywords). Retourne None si aucun match.
     """
+    import json as _json
+
     best_id: Optional[int] = None
     best_count = 0
 
     for m in models:
-        keywords = m.keywords_rules or []
+        raw = m.keywords_rules
+        # psycopg2 sur certains envs retourne JSONB en string — parser explicitement
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except (ValueError, TypeError):
+                raw = []
+        keywords = raw or []
         if not keywords:
             continue
         # Tous les keywords doivent être présents dans le titre
