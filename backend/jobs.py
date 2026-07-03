@@ -21,6 +21,25 @@ from logger import log_to_db
 logger = logging.getLogger("vinted.jobs")
 
 
+def _cluster_is_relevant(cluster: dict, query_words: set) -> bool:
+    """
+    Filtre de pertinence : au moins un mot de la requête (≥3 chars) doit
+    apparaître dans le model_name ou les suggested_keywords du cluster.
+    Les groupes "Autres" et "Divers" sont systématiquement exclus.
+    """
+    name = cluster.get("model_name", "").lower().strip()
+    # Exclure les fourre-tout générés par Gemini
+    if name in ("autres", "divers", "other", "various", "miscellaneous"):
+        return False
+    if name.startswith("autre") or name.startswith("divers"):
+        return False
+
+    name_words = set(name.split())
+    kw_words = {w.lower() for kw in cluster.get("suggested_keywords", []) for w in kw.split()}
+    combined = name_words | kw_words
+    return bool(query_words & combined)
+
+
 # ---------------------------------------------------------------------------
 # Création et exécution d'un job d'exploration
 # ---------------------------------------------------------------------------
@@ -89,6 +108,7 @@ def _run_exploration_job(job_id: str, params: dict) -> None:
         if titles:
             clusters = cluster_listings_by_model(titles)
             # Enrichir les clusters avec les métriques
+            import statistics as _stats
             for cluster in clusters:
                 indices = cluster.get("indices", [])
                 cluster_items = [level_items[i] for i in indices if i < len(level_items)]
@@ -108,7 +128,6 @@ def _run_exploration_job(job_id: str, params: dict) -> None:
                     if f is not None:
                         favs.append(int(f))
 
-                import statistics as _stats
                 cluster["nb_listings"] = len(cluster_items)
                 cluster["median_price"] = round(_stats.median(prices), 2) if prices else None
                 cluster["avg_favourites"] = round(sum(favs) / len(favs), 1) if favs else None
@@ -122,6 +141,18 @@ def _run_exploration_job(job_id: str, params: dict) -> None:
                     }
                     for ci in cluster_items[:3]
                 ]
+
+            # Filtre de pertinence : exclure les clusters hors-sujet
+            # Au moins un mot de la requête doit apparaître dans model_name ou suggested_keywords
+            query_words = {w for w in query.lower().split() if len(w) >= 3}
+            if query_words:
+                before = len(clusters)
+                clusters = [c for c in clusters if _cluster_is_relevant(c, query_words)]
+                log_to_db(
+                    "INFO", "jobs",
+                    f"Filtre pertinence: {before} → {len(clusters)} clusters conservés",
+                    {"before": before, "after": len(clusters), "query_words": list(query_words)},
+                )
 
         result = {
             "total_scraped": filtered["total_scraped"],
