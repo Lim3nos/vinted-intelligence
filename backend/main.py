@@ -144,6 +144,55 @@ def get_logs(
     return _get_logs(level, limit, db)
 
 
+@app.get("/api/admin/debug-match")
+def debug_match(db: Session = Depends(get_db)):
+    """Debug: teste le matching sur un échantillon réel."""
+    import json as _json
+
+    # Prendre le premier modèle avec des keywords
+    model = db.execute(
+        text("SELECT id, name, keywords_rules FROM product_models WHERE is_active = true AND jsonb_array_length(keywords_rules) > 0 LIMIT 1")
+    ).fetchone()
+    if not model:
+        return {"error": "no model with keywords"}
+
+    keywords = model.keywords_rules
+    if isinstance(keywords, str):
+        keywords = _json.loads(keywords)
+
+    # Chercher les listings qui contiennent tous les keywords (SQL)
+    conds = " AND ".join(f"title_normalized ILIKE :kw{i}" for i, _ in enumerate(keywords))
+    params = {f"kw{i}": f"%{kw}%" for i, kw in enumerate(keywords)}
+    params["sid"] = model[0]  # search_id de ce modèle via la table
+    sql_count = db.execute(
+        text(f"SELECT COUNT(*) FROM listings WHERE ({conds}) AND product_model_id IS NULL"),
+        params
+    ).scalar()
+
+    # Prendre 3 listings qui matchent en SQL et tester le matching Python
+    sample = db.execute(
+        text(f"SELECT id, title_normalized FROM listings WHERE ({conds}) AND product_model_id IS NULL LIMIT 3"),
+        params
+    ).fetchall()
+
+    python_results = []
+    for s in sample:
+        title = s.title_normalized or ""
+        match = all(kw.lower() in title for kw in keywords)
+        python_results.append({
+            "title": title,
+            "keywords": keywords,
+            "python_match": match,
+            "checks": {kw: (kw.lower() in title) for kw in keywords}
+        })
+
+    return {
+        "model": {"id": model.id, "name": model.name, "keywords": keywords, "kw_type": type(model.keywords_rules).__name__},
+        "sql_matches": sql_count,
+        "python_samples": python_results,
+    }
+
+
 @app.get("/api/admin/debug-models")
 def debug_models(db: Session = Depends(get_db)):
     """Debug: vérifie le type de keywords_rules retourné par psycopg2."""
