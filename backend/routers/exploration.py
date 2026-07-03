@@ -29,6 +29,11 @@ class ValidateClusterBody(BaseModel):
     median_price: Optional[float] = None
 
 
+class ValidateClustersBody(BaseModel):
+    clusters: list  # liste de ValidateClusterBody-like dicts
+    search_id: Optional[int] = None  # search_id par défaut si absent dans chaque cluster
+
+
 @router.post("/api/exploration/start", status_code=202)
 async def start_exploration(
     body: ExplorationParams,
@@ -86,3 +91,61 @@ def validate_cluster(body: ValidateClusterBody, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"Erreur création modèle : {e}")
+
+
+@router.post("/api/exploration/validate-clusters", status_code=201)
+def validate_clusters(body: ValidateClustersBody, db: Session = Depends(get_db)):
+    """
+    Valide plusieurs clusters en une seule requête.
+    Retourne : {created: [...], skipped: [...], errors: [...]}
+    """
+    created = []
+    skipped = []
+    errors = []
+
+    for item in body.clusters:
+        model_name = item.get("model_name", "").strip()
+        if not model_name:
+            errors.append({"model_name": "(vide)", "reason": "model_name manquant"})
+            continue
+
+        search_id = item.get("search_id") or body.search_id
+        suggested_keywords = item.get("suggested_keywords", [])
+
+        # Doublon
+        existing = db.execute(
+            text("SELECT id FROM product_models WHERE name = :name AND search_id = :sid"),
+            {"name": model_name, "sid": search_id},
+        ).fetchone()
+        if existing:
+            skipped.append({"model_name": model_name, "existing_id": existing.id})
+            continue
+
+        try:
+            row = db.execute(
+                text(
+                    """
+                    INSERT INTO product_models
+                        (name, keywords_rules, search_id, user_priority, is_active)
+                    VALUES (:name, CAST(:kw AS jsonb), :sid, 'normal', true)
+                    RETURNING id, name, signal_score, is_active, created_at
+                    """
+                ),
+                {
+                    "name": model_name,
+                    "kw": json.dumps(suggested_keywords),
+                    "sid": search_id,
+                },
+            ).fetchone()
+            db.commit()
+            created.append(dict(row._mapping))
+        except Exception as e:
+            db.rollback()
+            errors.append({"model_name": model_name, "reason": str(e)})
+
+    return {
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+        "summary": f"{len(created)} créés, {len(skipped)} ignorés (doublons), {len(errors)} erreurs",
+    }
