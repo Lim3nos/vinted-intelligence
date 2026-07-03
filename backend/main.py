@@ -162,47 +162,76 @@ def rematch_listings(db: Session = Depends(get_db)):
     Rattache rétroactivement les listings sans product_model_id aux modèles actifs
     en appliquant les keywords_rules. À appeler après avoir validé de nouveaux clusters.
     """
-    from collector import _match_model
+    import json as _json
+    from collections import defaultdict
 
-    models = db.execute(
+    # Charger les modèles actifs
+    model_rows = db.execute(
         text("SELECT id, search_id, keywords_rules FROM product_models WHERE is_active = true")
     ).fetchall()
 
-    # Grouper les modèles par search_id pour limiter les comparaisons
-    from collections import defaultdict
     models_by_search: dict = defaultdict(list)
-    for m in models:
+    for m in model_rows:
         models_by_search[m.search_id].append(m)
 
-    # Listings sans model_id
+    distinct_search_ids = list(models_by_search.keys())
+
+    # Listings sans model_id pour les search_id qui ont des modèles
     listings = db.execute(
         text(
             "SELECT id, search_id, title_normalized FROM listings "
-            "WHERE product_model_id IS NULL AND title_normalized IS NOT NULL"
-        )
+            "WHERE product_model_id IS NULL "
+            "  AND title_normalized IS NOT NULL "
+            "  AND search_id = ANY(:sids)"
+        ),
+        {"sids": distinct_search_ids},
     ).fetchall()
 
     matched = 0
+    skipped_no_candidates = 0
+
     for listing in listings:
         candidates = models_by_search.get(listing.search_id, [])
         if not candidates:
+            skipped_no_candidates += 1
             continue
-        model_id = _match_model(listing.title_normalized, candidates)
-        if model_id:
+
+        title = listing.title_normalized or ""
+        best_id = None
+        best_count = 0
+        for m in candidates:
+            raw = m.keywords_rules
+            if isinstance(raw, str):
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    raw = []
+            keywords = raw or []
+            if not keywords:
+                continue
+            if all(kw.lower() in title for kw in keywords):
+                if len(keywords) > best_count:
+                    best_count = len(keywords)
+                    best_id = m.id
+
+        if best_id:
             db.execute(
                 text("UPDATE listings SET product_model_id = :mid WHERE id = :lid"),
-                {"mid": model_id, "lid": listing.id},
+                {"mid": best_id, "lid": listing.id},
             )
             matched += 1
 
     db.commit()
 
-    log_to_db(
-        "INFO", "api",
-        f"Rematch listings : {matched}/{len(listings)} rattachés",
-        {"matched": matched, "total_unmatched": len(listings)},
-    )
-    return {"matched": matched, "total_unmatched": len(listings)}
+    result = {
+        "matched": matched,
+        "total_checked": len(listings),
+        "models_loaded": len(model_rows),
+        "search_ids_with_models": distinct_search_ids,
+        "skipped_no_candidates": skipped_no_candidates,
+    }
+    log_to_db("INFO", "api", f"Rematch listings : {matched}/{len(listings)} rattachés", result)
+    return result
 
 
 @app.get("/api/debug/scrape")
