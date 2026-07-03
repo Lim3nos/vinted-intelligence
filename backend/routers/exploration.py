@@ -23,8 +23,10 @@ class ExplorationParams(BaseModel):
 
 class ValidateClusterBody(BaseModel):
     model_name: str
-    keywords_rules: list
+    suggested_keywords: list = []
     search_id: Optional[int] = None
+    nb_listings: Optional[int] = None
+    median_price: Optional[float] = None
 
 
 @router.post("/api/exploration/start", status_code=202)
@@ -33,8 +35,8 @@ async def start_exploration(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    if body.search_type not in ("brand", "category"):
-        raise HTTPException(400, "search_type doit être 'brand' ou 'category'")
+    if body.search_type not in ("brand", "category", "model", "keyword"):
+        raise HTTPException(400, "search_type doit être 'brand', 'category', 'model' ou 'keyword'")
     if not body.query.strip():
         raise HTTPException(400, "query ne peut pas être vide")
     if body.filter_level not in range(1, 6):
@@ -52,23 +54,35 @@ async def job_status(job_id: str, db: Session = Depends(get_db)):
 @router.post("/api/exploration/validate-cluster", status_code=201)
 def validate_cluster(body: ValidateClusterBody, db: Session = Depends(get_db)):
     """
-    Crée un product_model à partir d'un cluster validé par l'utilisateur
-    et l'active en surveillance.
+    Crée un product_model à partir d'un cluster validé par l'utilisateur.
+    Colonnes réelles : name, keywords_rules (jsonb), search_id, user_priority, is_active.
     """
-    row = db.execute(
-        text(
-            """
-            INSERT INTO product_models
-                (name, keywords_rules, search_id, user_priority, is_active)
-            VALUES (:name, CAST(:kw AS jsonb), :sid, 'normal', true)
-            RETURNING *
-            """
-        ),
-        {
-            "name": body.model_name,
-            "kw": json.dumps(body.keywords_rules),
-            "sid": body.search_id,
-        },
+    # Vérifier que le modèle n'existe pas déjà (même nom + même search_id)
+    existing = db.execute(
+        text("SELECT id FROM product_models WHERE name = :name AND search_id = :sid"),
+        {"name": body.model_name, "sid": body.search_id},
     ).fetchone()
-    db.commit()
-    return dict(row._mapping)
+    if existing:
+        raise HTTPException(409, f"Un modèle '{body.model_name}' existe déjà pour cette recherche (id={existing.id})")
+
+    try:
+        row = db.execute(
+            text(
+                """
+                INSERT INTO product_models
+                    (name, keywords_rules, search_id, user_priority, is_active)
+                VALUES (:name, CAST(:kw AS jsonb), :sid, 'normal', true)
+                RETURNING *
+                """
+            ),
+            {
+                "name": body.model_name,
+                "kw": json.dumps(body.suggested_keywords),
+                "sid": body.search_id,
+            },
+        ).fetchone()
+        db.commit()
+        return dict(row._mapping)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Erreur création modèle : {e}")
