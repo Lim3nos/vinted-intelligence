@@ -45,7 +45,8 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
     rapid_sales = db.execute(
         text(
             """
-            SELECT final_price, item_status, time_to_disappear_hours
+            SELECT final_price, price, item_status, time_to_disappear_hours,
+                   title, disappeared_at, seller_login
             FROM listings
             WHERE product_model_id = :mid
               AND is_sold = true
@@ -136,9 +137,23 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
     if confidence == "low":
         warning = f"Confiance faible ({nb_for_confidence} vente(s)) — prix à titre indicatif uniquement."
 
+    recent_sales = [
+        {
+            "title": r.title,
+            "price": float(r.final_price),
+            "item_status": r.item_status,
+            "sold_at": r.disappeared_at.isoformat() if r.disappeared_at else None,
+            "hours_to_sell": round(r.time_to_disappear_hours, 1) if r.time_to_disappear_hours else None,
+            "seller": r.seller_login,
+        }
+        for r in rapid_sales
+    ]
+
     return {
         "suggested_price": suggested_price,
         "price_range": price_range,
+        "price_low": price_range[0],
+        "price_high": price_range[1],
         "confidence": confidence,
         "current_competition": current_competition,
         "median_sold_price": round(global_median, 2),
@@ -146,6 +161,7 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
         "price_by_status": price_by_status,
         "reasoning": reasoning_base + reasoning_competition,
         "warning": warning,
+        "recent_sales": recent_sales,
     }
 
 
