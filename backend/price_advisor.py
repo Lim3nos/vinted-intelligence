@@ -147,8 +147,14 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
             "price": float(r.final_price),
             "item_status": r.item_status,
             "sold_at": r.disappeared_at.isoformat() if r.disappeared_at else None,
-            "hours_to_sell": round(float(r.hours_online), 1) if r.hours_online else None,
+            # favoris — plusieurs noms pour compatibilité Retool
             "favoris": r.latest_favs,
+            "nb_favoris": r.latest_favs,
+            "favorites": r.latest_favs,
+            # durée en ligne — plusieurs noms pour compatibilité Retool
+            "hours_to_sell": round(float(r.hours_online), 1) if r.hours_online else None,
+            "duree_en_ligne": round(float(r.hours_online), 1) if r.hours_online else None,
+            "duree": round(float(r.hours_online), 1) if r.hours_online else None,
             "seller": r.seller_login,
         }
         for r in rapid_sales
