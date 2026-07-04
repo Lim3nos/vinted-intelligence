@@ -186,9 +186,27 @@ def debug_match(db: Session = Depends(get_db)):
             "checks": {kw: (kw.lower() in title) for kw in keywords}
         })
 
+    # Count par keyword individuel
+    per_keyword = {}
+    for kw in keywords:
+        c = db.execute(
+            text("SELECT COUNT(*) FROM listings WHERE title_normalized ILIKE :kw AND product_model_id IS NULL"),
+            {"kw": f"%{kw}%"}
+        ).scalar()
+        per_keyword[kw] = c
+
+    # 3 exemples de titles contenant le premier keyword
+    first_kw = keywords[0] if keywords else ""
+    samples_kw = db.execute(
+        text("SELECT title_normalized FROM listings WHERE title_normalized ILIKE :kw LIMIT 5"),
+        {"kw": f"%{first_kw}%"}
+    ).fetchall()
+
     return {
         "model": {"id": model.id, "name": model.name, "keywords": keywords, "kw_type": type(model.keywords_rules).__name__},
-        "sql_matches": sql_count,
+        "sql_all_keywords_match": sql_count,
+        "per_keyword_count": per_keyword,
+        "samples_first_keyword": [r.title_normalized for r in samples_kw],
         "python_samples": python_results,
     }
 
@@ -258,10 +276,12 @@ def rematch_listings(db: Session = Depends(get_db)):
             keywords = raw or []
             if not keywords:
                 continue
-            if all(kw.lower() in title for kw in keywords):
-                if len(keywords) > best_count:
-                    best_count = len(keywords)
-                    best_id = m.id
+            import math as _math
+            needed = _math.ceil(len(keywords) / 2)
+            matches = sum(1 for kw in keywords if kw.lower() in title)
+            if matches >= needed and matches > best_count:
+                best_count = matches
+                best_id = m.id
 
         if best_id:
             db.execute(
