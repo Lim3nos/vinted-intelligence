@@ -211,6 +211,18 @@ def debug_match(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/admin/debug-listings")
+def debug_listings(db: Session = Depends(get_db)):
+    """Debug: montre ce qui est réellement dans title_normalized."""
+    rows = db.execute(
+        text(
+            "SELECT id, search_id, title_normalized, product_model_id "
+            "FROM listings ORDER BY id LIMIT 10"
+        )
+    ).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
 @app.get("/api/admin/debug-models")
 def debug_models(db: Session = Depends(get_db)):
     """Debug: vérifie le type de keywords_rules retourné par psycopg2."""
