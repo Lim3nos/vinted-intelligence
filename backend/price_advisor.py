@@ -46,7 +46,8 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
         text(
             """
             SELECT final_price, price, item_status, time_to_disappear_hours,
-                   title, disappeared_at, seller_login
+                   title, disappeared_at, seller_login, latest_favs,
+                   EXTRACT(EPOCH FROM (disappeared_at - first_seen_at)) / 3600 AS hours_online
             FROM listings
             WHERE product_model_id = :mid
               AND is_sold = true
@@ -143,7 +144,8 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
             "price": float(r.final_price),
             "item_status": r.item_status,
             "sold_at": r.disappeared_at.isoformat() if r.disappeared_at else None,
-            "hours_to_sell": round(r.time_to_disappear_hours, 1) if r.time_to_disappear_hours else None,
+            "hours_to_sell": round(float(r.hours_online), 1) if r.hours_online else None,
+            "favoris": r.latest_favs,
             "seller": r.seller_login,
         }
         for r in rapid_sales
