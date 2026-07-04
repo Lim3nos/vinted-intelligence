@@ -155,6 +155,11 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
             "hours_to_sell": round(float(r.hours_online), 1) if r.hours_online else None,
             "duree_en_ligne": round(float(r.hours_online), 1) if r.hours_online else None,
             "duree": round(float(r.hours_online), 1) if r.hours_online else None,
+            "hours": round(float(r.hours_online), 1) if r.hours_online else None,
+            "hours_online": round(float(r.hours_online), 1) if r.hours_online else None,
+            "duration": round(float(r.hours_online), 1) if r.hours_online else None,
+            "temps_en_ligne": round(float(r.hours_online), 1) if r.hours_online else None,
+            "time_online": round(float(r.hours_online), 1) if r.hours_online else None,
             "seller": r.seller_login,
         }
         for r in rapid_sales
