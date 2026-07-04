@@ -211,6 +211,48 @@ def debug_match(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/api/admin/test-match/{listing_id}")
+def test_match(listing_id: int, db: Session = Depends(get_db)):
+    """Test le matching d'un listing spécifique contre tous les modèles actifs."""
+    import json as _json, math as _math
+
+    listing = db.execute(
+        text("SELECT id, search_id, title_normalized FROM listings WHERE id = :id"),
+        {"id": listing_id},
+    ).fetchone()
+    if not listing:
+        return {"error": "listing not found"}
+
+    models = db.execute(
+        text("SELECT id, name, keywords_rules FROM product_models WHERE is_active = true AND search_id = :sid"),
+        {"sid": listing.search_id},
+    ).fetchall()
+
+    results = []
+    for m in models:
+        raw = m.keywords_rules
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                raw = []
+        keywords = raw or []
+        if not keywords:
+            results.append({"model": m.name, "keywords": keywords, "skip": "no keywords"})
+            continue
+        needed = _math.ceil(len(keywords) / 2)
+        title = listing.title_normalized or ""
+        per_kw = {kw: (kw.lower() in title) for kw in keywords}
+        matches = sum(1 for v in per_kw.values() if v)
+        results.append({
+            "model_id": m.id, "model": m.name, "keywords": keywords,
+            "needed": needed, "matches": matches, "match": matches >= needed,
+            "per_keyword": per_kw, "title": title
+        })
+
+    return {"listing_id": listing_id, "search_id": listing.search_id, "results": results}
+
+
 @app.get("/api/admin/debug-listings")
 def debug_listings(db: Session = Depends(get_db)):
     """Debug: montre ce qui est réellement dans title_normalized."""
