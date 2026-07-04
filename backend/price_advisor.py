@@ -46,7 +46,10 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
         text(
             """
             SELECT final_price, price, item_status, time_to_disappear_hours,
-                   title, disappeared_at, seller_login, latest_favs,
+                   title, disappeared_at, seller_login,
+                   (SELECT favourite_count FROM favourites_snapshots fs
+                    WHERE fs.listing_id = listings.id
+                    ORDER BY fs.snapshot_at DESC LIMIT 1) AS latest_favs,
                    EXTRACT(EPOCH FROM (disappeared_at - first_seen_at)) / 3600 AS hours_online
             FROM listings
             WHERE product_model_id = :mid
