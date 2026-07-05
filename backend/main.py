@@ -197,7 +197,9 @@ def verify_sold_listings(db: Session = Depends(get_db)):
     reset_count = 0
     confirmed_count = 0
     error_count = 0
+    result: dict = {}
 
+    status_counts: dict = {}
     for listing in candidates:
         try:
             time.sleep(random.uniform(0.8, 1.8))
@@ -207,14 +209,23 @@ def verify_sold_listings(db: Session = Depends(get_db)):
                 headers={**_API_HEADERS, "Referer": f"{BASE_URL}/items/{listing.vinted_id}"},
                 timeout=10,
             )
+            sc = resp.status_code
+            status_counts[str(sc)] = status_counts.get(str(sc), 0) + 1
 
-            if resp.status_code == 200:
+            if sc == 200:
                 data = resp.json()
-                item = data.get("item") or data
-                can_be_sold = item.get("can_be_sold")
+                item_data = data.get("item") or {}
+                can_be_sold = item_data.get("can_be_sold")
+                # Conserver les clés utiles pour le premier item inspecté
+                if not result.get("sample_item_keys") and item_data:
+                    result["sample_item_keys"] = list(item_data.keys())[:30]
+                    result["sample_can_be_sold"] = can_be_sold
 
-                if can_be_sold is True or can_be_sold is None:
-                    # Item encore actif → faux positif, réinitialiser
+                if can_be_sold is False:
+                    # Explicitement vendu/réservé
+                    confirmed_count += 1
+                else:
+                    # can_be_sold=null ou true → item encore actif → faux positif
                     db.execute(
                         text(
                             """
@@ -231,12 +242,27 @@ def verify_sold_listings(db: Session = Depends(get_db)):
                         {"lid": listing.id},
                     )
                     reset_count += 1
-                else:
-                    confirmed_count += 1
 
-            elif resp.status_code == 404:
-                # Item supprimé → vendu/retiré, confirmer
+            elif sc == 404:
                 confirmed_count += 1
+            elif sc in (401, 403):
+                # Auth/bloqué — traiter comme encore actif (conservateur)
+                db.execute(
+                    text(
+                        """
+                        UPDATE listings
+                        SET is_sold = false,
+                            disappeared_at = NULL,
+                            time_to_disappear_hours = NULL,
+                            final_price = NULL,
+                            consecutive_absences = 0,
+                            last_seen_at = NOW()
+                        WHERE id = :lid
+                        """
+                    ),
+                    {"lid": listing.id},
+                )
+                reset_count += 1
             else:
                 error_count += 1
 
@@ -246,12 +272,11 @@ def verify_sold_listings(db: Session = Depends(get_db)):
 
     db.commit()
 
-    result = {
-        "checked": len(candidates),
-        "reset": reset_count,
-        "confirmed_sold": confirmed_count,
-        "errors": error_count,
-    }
+    result["checked"] = len(candidates)
+    result["reset"] = reset_count
+    result["confirmed_sold"] = confirmed_count
+    result["errors"] = error_count
+    result["status_codes"] = status_counts
     log_to_db("INFO", "api", f"verify-sold : {reset_count} réinitialisés, {confirmed_count} confirmés", result)
     return result
 
