@@ -338,14 +338,14 @@ def _match_model(title_normalized: str, models: list) -> Optional[int]:
         keywords = raw or []
         if not keywords:
             continue
-        # Au moins 50% des keywords doivent être présents (arrondi au supérieur)
-        import math as _math
-        needed = _math.ceil(len(keywords) / 2)
+        # Les 2 premiers keywords sont obligatoires (tous si <= 2 keywords)
+        mandatory = keywords[:2]
+        if not all(kw.lower() in title_normalized for kw in mandatory):
+            continue
         matches = sum(1 for kw in keywords if kw.lower() in title_normalized)
-        if matches >= needed:
-            if matches > best_count:
-                best_count = matches
-                best_id = m.id
+        if matches > best_count:
+            best_count = matches
+            best_id = m.id
 
     return best_id
 

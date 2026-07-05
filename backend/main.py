@@ -145,6 +145,15 @@ def get_logs(
 
 
 
+@app.post("/api/admin/reset-and-rematch", status_code=202)
+def reset_and_rematch(db: Session = Depends(get_db)):
+    """Remet product_model_id à NULL sur tous les listings puis relance le rematch."""
+    db.execute(text("UPDATE listings SET product_model_id = NULL"))
+    db.commit()
+    log_to_db("INFO", "api", "Reset product_model_id — rematch en cours")
+    return rematch_listings(db)
+
+
 @app.post("/api/admin/rematch-listings", status_code=202)
 def rematch_listings(db: Session = Depends(get_db)):
     """
@@ -198,10 +207,11 @@ def rematch_listings(db: Session = Depends(get_db)):
             keywords = raw or []
             if not keywords:
                 continue
-            import math as _math
-            needed = _math.ceil(len(keywords) / 2)
+            mandatory = keywords[:2]
+            if not all(kw.lower() in title for kw in mandatory):
+                continue
             matches = sum(1 for kw in keywords if kw.lower() in title)
-            if matches >= needed and matches > best_count:
+            if matches > best_count:
                 best_count = matches
                 best_id = m.id
 
