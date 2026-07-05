@@ -102,6 +102,23 @@ def _run_exploration_job(job_id: str, params: dict) -> None:
 
         # 4. Clustering Gemini sur les titres du niveau sélectionné
         level_items = filtered.get(f"level_{filter_level}", [])
+
+        # Pré-filtre : au moins un mot de la query doit apparaître dans le titre
+        # Évite que Gemini reçoive des annonces hors-sujet (marques parasites)
+        query_words = {w for w in query.lower().split() if len(w) >= 3}
+        if query_words:
+            before_title = len(level_items)
+            level_items = [
+                item for item in level_items
+                if any(w in (item.get("title") or "").lower() for w in query_words)
+            ]
+            if before_title != len(level_items):
+                log_to_db(
+                    "INFO", "jobs",
+                    f"Pré-filtre titre: {before_title} → {len(level_items)} items pour Gemini",
+                    {"before": before_title, "after": len(level_items), "query_words": list(query_words)},
+                )
+
         titles = [it.get("title", "") for it in level_items if it.get("title")]
 
         clusters = []
@@ -142,9 +159,7 @@ def _run_exploration_job(job_id: str, params: dict) -> None:
                     for ci in cluster_items[:3]
                 ]
 
-            # Filtre de pertinence : exclure les clusters hors-sujet
-            # Au moins un mot de la requête doit apparaître dans model_name ou suggested_keywords
-            query_words = {w for w in query.lower().split() if len(w) >= 3}
+            # Filtre de pertinence : exclure les clusters "Autres", "Divers", etc.
             if query_words:
                 before = len(clusters)
                 clusters = [c for c in clusters if _cluster_is_relevant(c, query_words)]

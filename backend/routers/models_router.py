@@ -196,6 +196,33 @@ def get_velocity(model_id: int, db: Session = Depends(get_db)):
     return [dict(r._mapping) for r in rows]
 
 
+@router.get("/{model_id}/variants")
+def get_variants(model_id: int, db: Session = Depends(get_db)):
+    row = db.execute(
+        text("SELECT id, name, search_variants FROM product_models WHERE id=:mid"),
+        {"mid": model_id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Modèle introuvable")
+    return {
+        "model_id": row.id,
+        "model_name": row.name,
+        "search_variants": row.search_variants or [],
+    }
+
+
+@router.post("/{model_id}/variants")
+def set_variants(model_id: int, body: dict, db: Session = Depends(get_db)):
+    import json
+    variants = body.get("search_variants", [])
+    db.execute(
+        text("UPDATE product_models SET search_variants=CAST(:v AS jsonb) WHERE id=:mid"),
+        {"v": json.dumps(variants), "mid": model_id},
+    )
+    db.commit()
+    return {"model_id": model_id, "search_variants": variants}
+
+
 @router.get("/{model_id}/score-history")
 def get_score_history(model_id: int, db: Session = Depends(get_db)):
     row = db.execute(

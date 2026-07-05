@@ -208,6 +208,59 @@ Titres à analyser :
     return []
 
 
+def generate_search_variants(model_name: str, keywords: list, search_query: str = "") -> list:
+    """
+    Génère des variantes de requête de recherche pour un modèle produit via Gemini.
+
+    Exemples : "Lemaire Castanet" → ["lemaire castagnette", "castanet ballerine lemaire", ...]
+    Retourne [] si le circuit est ouvert ou en cas d'erreur.
+    """
+    if not model_name or _check_circuit_breaker():
+        return []
+
+    kw_str = ", ".join(keywords) if keywords else "(aucun)"
+    context = f" (recherche parente : {search_query})" if search_query else ""
+
+    prompt = f"""Tu es expert en mode et revente de pièces de créateurs sur Vinted et sites similaires.
+
+Modèle produit : "{model_name}"{context}
+Mots-clés existants : {kw_str}
+
+Génère des variantes de requêtes de recherche pour trouver des annonces de CE produit exact
+qui n'utilisent pas forcément le nom officiel ou la graphie standard.
+
+Tiens compte de :
+- Orthographes alternatives et fautes de frappe fréquentes
+- Traductions (anglais, espagnol, italien)
+- Diminutifs ou abréviations
+- Façons alternatives de décrire la pièce (type de vêtement, matière, silhouette)
+
+Réponds UNIQUEMENT avec un tableau JSON de chaînes de recherche. Maximum 6 variantes.
+Pas de texte avant ni après. Pas de balises markdown.
+
+Exemple pour "Lemaire Castanet" :
+["lemaire castagnette", "lemaire castanet ballerine", "lemaire flat mule castanet"]
+
+Tableau JSON :"""
+
+    try:
+        client = _get_client()
+        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        raw = _strip_markdown(resp.text)
+        variants = json.loads(raw)
+        if isinstance(variants, list):
+            result = [str(v).strip() for v in variants if v and str(v).strip()][:6]
+            log_to_db(
+                "INFO", "ai_clustering",
+                f"Variantes générées pour '{model_name}': {result}",
+                {"model": model_name, "variants": result},
+            )
+            return result
+    except Exception as e:
+        log_to_db("WARNING", "ai_clustering", f"Erreur génération variantes '{model_name}': {e}")
+    return []
+
+
 def is_circuit_open() -> bool:
     """Retourne True si le circuit breaker Gemini est actuellement ouvert."""
     if _circuit_open_until is None:

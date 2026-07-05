@@ -432,6 +432,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
 
     new_count = 0
     updated_count = 0
+    sold_from_api_count = 0
     scraped_vinted_ids = set()
 
     # 5. Traitement de chaque annonce
@@ -472,9 +473,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             favourite_count = int(item.get("favourite_count") or 0)
             view_count = item.get("view_count")
 
+            # Détection vente directe via l'API Vinted (can_be_sold=False → article vendu/réservé)
+            is_sold_from_api = item.get("can_be_sold") is False
+
             # c. Vérifier si l'annonce existe déjà
             existing = db.execute(
-                text("SELECT id, price FROM listings WHERE vinted_id = :vid"),
+                text("SELECT id, price, is_sold, first_seen_at FROM listings WHERE vinted_id = :vid"),
                 {"vid": vinted_id},
             ).fetchone()
 
@@ -544,55 +548,105 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                     ),
                     {"lid": listing_id, "vid": vinted_id, "price": price, "now": now_utc},
                 )
-                new_count += 1
+
+                if is_sold_from_api:
+                    # Annonce déjà vendue dès la première scrape — marquer immédiatement
+                    db.execute(
+                        text(
+                            """
+                            UPDATE listings
+                            SET is_sold = true, disappeared_at = :now,
+                                final_price = :price, time_to_disappear_hours = NULL
+                            WHERE id = :lid
+                            """
+                        ),
+                        {"now": now_utc, "price": price, "lid": listing_id},
+                    )
+                    sold_from_api_count += 1
+                else:
+                    new_count += 1
 
             else:
                 listing_id = existing.id
 
-                # e. Annonce existante : mettre à jour last_seen_at + snapshot favoris
-                # Si pas encore rattachée à un modèle, tenter le matching maintenant
-                db.execute(
-                    text(
-                        """
-                        UPDATE listings
-                        SET last_seen_at = :now,
-                            consecutive_absences = 0,
-                            product_model_id = COALESCE(product_model_id, :model_id)
-                        WHERE id = :lid
-                        """
-                    ),
-                    {"now": now_utc, "lid": listing_id, "model_id": matched_model_id},
-                )
-                db.execute(
-                    text(
-                        """
-                        INSERT INTO favourites_snapshots
-                            (listing_id, vinted_id, favourite_count, view_count, snapshot_at)
-                        VALUES (:lid, :vid, :fav, :views, :now)
-                        """
-                    ),
-                    {"lid": listing_id, "vid": vinted_id,
-                     "fav": favourite_count, "views": view_count, "now": now_utc},
-                )
+                if is_sold_from_api and not existing.is_sold:
+                    # Annonce existante qui vient d'être vendue — détecter via l'API
+                    fe = existing.first_seen_at
+                    if fe and fe.tzinfo is None:
+                        fe = fe.replace(tzinfo=timezone.utc)
+                    life_hours = (now_utc - fe).total_seconds() / 3600 if fe else None
 
-                # Détecter changement de prix
-                if existing.price is not None and price is not None:
-                    if abs(float(existing.price) - float(price)) > 0.01:
-                        db.execute(
-                            text("UPDATE listings SET price = :price WHERE id = :lid"),
-                            {"price": price, "lid": listing_id},
-                        )
-                        db.execute(
-                            text(
-                                """
-                                INSERT INTO price_history (listing_id, vinted_id, price, recorded_at)
-                                VALUES (:lid, :vid, :price, :now)
-                                """
-                            ),
-                            {"lid": listing_id, "vid": vinted_id, "price": price, "now": now_utc},
-                        )
+                    db.execute(
+                        text(
+                            """
+                            UPDATE listings
+                            SET is_sold = true, disappeared_at = :now,
+                                final_price = :price, time_to_disappear_hours = :life_h,
+                                last_seen_at = :now, consecutive_absences = 0,
+                                product_model_id = COALESCE(product_model_id, :model_id)
+                            WHERE id = :lid
+                            """
+                        ),
+                        {"now": now_utc, "price": price, "life_h": life_hours,
+                         "model_id": matched_model_id, "lid": listing_id},
+                    )
+                    db.execute(
+                        text(
+                            """
+                            INSERT INTO favourites_snapshots
+                                (listing_id, vinted_id, favourite_count, view_count, snapshot_at)
+                            VALUES (:lid, :vid, :fav, :views, :now)
+                            """
+                        ),
+                        {"lid": listing_id, "vid": vinted_id,
+                         "fav": favourite_count, "views": view_count, "now": now_utc},
+                    )
+                    sold_from_api_count += 1
 
-                updated_count += 1
+                else:
+                    # e. Annonce existante active : mettre à jour last_seen_at + snapshot favoris
+                    db.execute(
+                        text(
+                            """
+                            UPDATE listings
+                            SET last_seen_at = :now,
+                                consecutive_absences = 0,
+                                product_model_id = COALESCE(product_model_id, :model_id)
+                            WHERE id = :lid
+                            """
+                        ),
+                        {"now": now_utc, "lid": listing_id, "model_id": matched_model_id},
+                    )
+                    db.execute(
+                        text(
+                            """
+                            INSERT INTO favourites_snapshots
+                                (listing_id, vinted_id, favourite_count, view_count, snapshot_at)
+                            VALUES (:lid, :vid, :fav, :views, :now)
+                            """
+                        ),
+                        {"lid": listing_id, "vid": vinted_id,
+                         "fav": favourite_count, "views": view_count, "now": now_utc},
+                    )
+
+                    # Détecter changement de prix
+                    if existing.price is not None and price is not None:
+                        if abs(float(existing.price) - float(price)) > 0.01:
+                            db.execute(
+                                text("UPDATE listings SET price = :price WHERE id = :lid"),
+                                {"price": price, "lid": listing_id},
+                            )
+                            db.execute(
+                                text(
+                                    """
+                                    INSERT INTO price_history (listing_id, vinted_id, price, recorded_at)
+                                    VALUES (:lid, :vid, :price, :now)
+                                    """
+                                ),
+                                {"lid": listing_id, "vid": vinted_id, "price": price, "now": now_utc},
+                            )
+
+                    updated_count += 1
 
         except Exception as e:
             logger.error("Erreur traitement annonce %s: %s", item.get("id"), e)
@@ -719,6 +773,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         "new_listings": new_count,
         "updated_listings": updated_count,
         "disappeared": disappeared_count,
+        "sold_from_api": sold_from_api_count,
         "active_in_db": agg.active_count if agg else 0,
         "snapshot_at": now_utc.isoformat(),
     }

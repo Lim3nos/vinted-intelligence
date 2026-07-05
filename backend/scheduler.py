@@ -125,6 +125,119 @@ def setup_scheduler(db_session_factory):
             db.close()
 
     # -----------------------------------------------------------------------
+    # Job 5 — Snapshots sur variantes de recherche des modèles
+    # -----------------------------------------------------------------------
+    def job_variant_snapshots():
+        import asyncio
+        from collector import safe_request_paginated, normalize_title, _extract_price, _extract_seller
+        from datetime import datetime, timezone
+
+        db = db_session_factory()
+        try:
+            models = db.execute(
+                text(
+                    """
+                    SELECT pm.id AS model_id, pm.name, pm.search_variants,
+                           s.price_min, s.price_max, s.id AS search_id
+                    FROM product_models pm
+                    JOIN searches s ON s.id = pm.search_id
+                    WHERE pm.is_active = true
+                      AND pm.search_variants IS NOT NULL
+                      AND jsonb_array_length(pm.search_variants) > 0
+                    """
+                )
+            ).fetchall()
+
+            if not models:
+                return
+
+            now_utc = datetime.now(timezone.utc)
+            total_new = 0
+
+            for model in models:
+                variants = model.search_variants or []
+                for variant in variants:
+                    if not variant:
+                        continue
+                    params = {"search_text": variant}
+                    if model.price_min:
+                        params["price_from"] = model.price_min
+                    if model.price_max:
+                        params["price_to"] = model.price_max
+
+                    items = safe_request_paginated(params, max_pages=2)
+                    if not items:
+                        continue
+
+                    for item in items:
+                        try:
+                            vinted_id = int(item.get("id", 0))
+                            if not vinted_id:
+                                continue
+                            existing = db.execute(
+                                text("SELECT id, product_model_id FROM listings WHERE vinted_id=:vid"),
+                                {"vid": vinted_id},
+                            ).fetchone()
+
+                            if existing:
+                                # Rattacher au modèle si pas encore fait
+                                if not existing.product_model_id:
+                                    db.execute(
+                                        text("UPDATE listings SET product_model_id=:mid WHERE id=:lid"),
+                                        {"mid": model.model_id, "lid": existing.id},
+                                    )
+                            else:
+                                # Insérer avec product_model_id direct (trouvé via variante)
+                                title = item.get("title") or ""
+                                title_norm = normalize_title(title)
+                                price = _extract_price(item.get("price"))
+                                seller_info = _extract_seller(item)
+                                url = item.get("url") or ""
+                                is_sold_from_api = item.get("can_be_sold") is False
+                                db.execute(
+                                    text(
+                                        """
+                                        INSERT INTO listings (
+                                            vinted_id, search_id, product_model_id,
+                                            title, title_normalized, price,
+                                            seller_id, seller_login, url,
+                                            first_seen_at, last_seen_at, consecutive_absences,
+                                            is_sold
+                                        ) VALUES (
+                                            :vid, :sid, :mid,
+                                            :title, :title_norm, :price,
+                                            :seller_id, :seller_login, :url,
+                                            :now, :now, 0,
+                                            :is_sold
+                                        ) ON CONFLICT (vinted_id) DO NOTHING
+                                        """
+                                    ),
+                                    {
+                                        "vid": vinted_id, "sid": model.search_id, "mid": model.model_id,
+                                        "title": title, "title_norm": title_norm, "price": price,
+                                        **seller_info, "url": url, "now": now_utc,
+                                        "is_sold": is_sold_from_api,
+                                    },
+                                )
+                                total_new += 1
+                        except Exception:
+                            continue
+
+                db.commit()
+
+            if total_new > 0:
+                log_to_db(
+                    "INFO", "scheduler",
+                    f"Snapshot variantes — {total_new} nouvelles annonces insérées",
+                    {"new": total_new},
+                )
+
+        except Exception as e:
+            log_to_db("ERROR", "scheduler", f"Erreur job_variant_snapshots: {e}")
+        finally:
+            db.close()
+
+    # -----------------------------------------------------------------------
     # Job 4 — Health check
     # -----------------------------------------------------------------------
     def job_health_check():
@@ -185,6 +298,13 @@ def setup_scheduler(db_session_factory):
         job_health_check,
         trigger=IntervalTrigger(hours=1),
         id="health_check",
+        misfire_grace_time=300,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        job_variant_snapshots,
+        trigger=IntervalTrigger(hours=6),
+        id="variant_snapshots",
         misfire_grace_time=300,
         replace_existing=True,
     )

@@ -29,6 +29,20 @@ async def lifespan(app: FastAPI):
     """Démarrage : init DB + scheduler. Arrêt : shutdown scheduler."""
     log_to_db("INFO", "api", "Démarrage Vinted Intelligence API")
 
+    # Migration : s'assurer que les colonnes récentes existent
+    from database.connection import SessionLocal as _SL
+    _db_mig = _SL()
+    try:
+        _db_mig.execute(text(
+            "ALTER TABLE product_models ADD COLUMN IF NOT EXISTS "
+            "search_variants JSONB DEFAULT '[]'::jsonb"
+        ))
+        _db_mig.commit()
+    except Exception:
+        _db_mig.rollback()
+    finally:
+        _db_mig.close()
+
     from scheduler import setup_scheduler
     from database.connection import SessionLocal
     scheduler = setup_scheduler(SessionLocal)
