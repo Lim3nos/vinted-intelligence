@@ -46,7 +46,7 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
         text(
             """
             SELECT final_price, price, item_status, time_to_disappear_hours,
-                   title, disappeared_at, seller_login,
+                   title, url, disappeared_at, seller_login,
                    (SELECT favourite_count FROM favourites_snapshots fs
                     WHERE fs.listing_id = listings.id
                     ORDER BY fs.snapshot_at DESC LIMIT 1) AS latest_favs,
@@ -148,6 +148,8 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
             "item_status": r.item_status,
             "sold_at": r.disappeared_at.isoformat() if r.disappeared_at else None,
             # favoris — plusieurs noms pour compatibilité Retool
+            "url": r.url,
+            "lien": r.url,
             "favoris": r.latest_favs,
             "nb_favoris": r.latest_favs,
             "favorites": r.latest_favs,
