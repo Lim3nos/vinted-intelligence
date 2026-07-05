@@ -316,6 +316,34 @@ def _detect_brand_in_title(title_normalized: str, brand: Optional[str]) -> bool:
     return False
 
 
+def _verify_item_gone(vinted_id: int) -> bool:
+    """
+    Vérifie via l'API Vinted si un item est réellement vendu/supprimé.
+    Retourne True si disparu/vendu, False si encore actif.
+    Conservateur : en cas d'erreur, retourne False (ne pas marquer vendu par erreur).
+    """
+    import time, random
+    try:
+        time.sleep(random.uniform(1.0, 2.0))
+        session = _get_curl_session()
+        resp = session.get(
+            f"{BASE_URL}/api/v2/items/{vinted_id}",
+            headers={**_API_HEADERS, "Referer": f"{BASE_URL}/items/{vinted_id}"},
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            return True  # item supprimé
+        if resp.status_code == 200:
+            data = resp.json()
+            item = data.get("item") or data
+            can_be_sold = item.get("can_be_sold")
+            # Vendu/réservé uniquement si explicitement False
+            return can_be_sold is False
+        return False  # autre statut : conservateur
+    except Exception:
+        return False
+
+
 def _match_model(title_normalized: str, models: list) -> Optional[int]:
     """
     Retourne l'id du product_model dont tous les keywords_rules sont présents
@@ -667,6 +695,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         {"sid": search_id},
     ).fetchall()
 
+    verify_budget = 15  # max vérifications API par snapshot (anti rate-limit)
     for row in active_in_db:
         if row.vinted_id not in scraped_vinted_ids:
             updated = db.execute(
@@ -681,29 +710,39 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                 {"lid": row.id},
             ).fetchone()
 
-            if updated and updated.consecutive_absences >= 2:
-                first_seen = updated.first_seen_at
-                if first_seen and first_seen.tzinfo is None:
-                    first_seen = first_seen.replace(tzinfo=timezone.utc)
-                life_hours = (
-                    (now_utc - first_seen).total_seconds() / 3600
-                    if first_seen else None
-                )
-                db.execute(
-                    text(
-                        """
-                        UPDATE listings
-                        SET is_sold = true,
-                            disappeared_at = :now,
-                            time_to_disappear_hours = :life_h,
-                            final_price = :price
-                        WHERE id = :lid
-                        """
-                    ),
-                    {"now": now_utc, "life_h": life_hours,
-                     "price": updated.price, "lid": row.id},
-                )
-                disappeared_count += 1
+            if updated and updated.consecutive_absences >= 4:
+                # Vérifier via l'API Vinted avant de marquer vendu
+                item_gone = False
+                if verify_budget > 0:
+                    item_gone = _verify_item_gone(row.vinted_id)
+                    verify_budget -= 1
+                else:
+                    # Budget épuisé : marquer seulement après beaucoup d'absences
+                    item_gone = updated.consecutive_absences >= 8
+
+                if item_gone:
+                    first_seen = updated.first_seen_at
+                    if first_seen and first_seen.tzinfo is None:
+                        first_seen = first_seen.replace(tzinfo=timezone.utc)
+                    life_hours = (
+                        (now_utc - first_seen).total_seconds() / 3600
+                        if first_seen else None
+                    )
+                    db.execute(
+                        text(
+                            """
+                            UPDATE listings
+                            SET is_sold = true,
+                                disappeared_at = :now,
+                                time_to_disappear_hours = :life_h,
+                                final_price = :price
+                            WHERE id = :lid
+                            """
+                        ),
+                        {"now": now_utc, "life_h": life_hours,
+                         "price": updated.price, "lid": row.id},
+                    )
+                    disappeared_count += 1
 
     db.commit()
 

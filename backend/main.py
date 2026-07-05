@@ -7,7 +7,10 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import logging
 from fastapi import FastAPI, Depends, Query
+
+logger = logging.getLogger("vinted.main")
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -159,6 +162,100 @@ def get_logs(
 
 
 
+@app.post("/api/admin/verify-sold", status_code=202)
+def verify_sold_listings(db: Session = Depends(get_db)):
+    """
+    Vérifie chaque listing marqué comme vendu récemment (60j) via l'API Vinted.
+    Réinitialise les faux positifs (items encore actifs sur Vinted).
+    Traite max 100 listings avec délai anti-bot.
+    """
+    from datetime import timedelta
+    import time, random
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+
+    # Listings "vendus" récemment, sauf ceux déjà confirmés avec final_price
+    candidates = db.execute(
+        text(
+            """
+            SELECT id, vinted_id, title, disappeared_at
+            FROM listings
+            WHERE is_sold = true
+              AND disappeared_at >= :cutoff
+            ORDER BY disappeared_at DESC
+            LIMIT 150
+            """
+        ),
+        {"cutoff": cutoff},
+    ).fetchall()
+
+    if not candidates:
+        return {"checked": 0, "reset": 0, "confirmed_sold": 0}
+
+    from collector import _get_curl_session, _API_HEADERS, BASE_URL
+
+    reset_count = 0
+    confirmed_count = 0
+    error_count = 0
+
+    for listing in candidates:
+        try:
+            time.sleep(random.uniform(0.8, 1.8))
+            session = _get_curl_session()
+            resp = session.get(
+                f"{BASE_URL}/api/v2/items/{listing.vinted_id}",
+                headers={**_API_HEADERS, "Referer": f"{BASE_URL}/items/{listing.vinted_id}"},
+                timeout=10,
+            )
+
+            if resp.status_code == 200:
+                data = resp.json()
+                item = data.get("item") or data
+                can_be_sold = item.get("can_be_sold")
+
+                if can_be_sold is True or can_be_sold is None:
+                    # Item encore actif → faux positif, réinitialiser
+                    db.execute(
+                        text(
+                            """
+                            UPDATE listings
+                            SET is_sold = false,
+                                disappeared_at = NULL,
+                                time_to_disappear_hours = NULL,
+                                final_price = NULL,
+                                consecutive_absences = 0,
+                                last_seen_at = NOW()
+                            WHERE id = :lid
+                            """
+                        ),
+                        {"lid": listing.id},
+                    )
+                    reset_count += 1
+                else:
+                    confirmed_count += 1
+
+            elif resp.status_code == 404:
+                # Item supprimé → vendu/retiré, confirmer
+                confirmed_count += 1
+            else:
+                error_count += 1
+
+        except Exception as e:
+            error_count += 1
+            logger.warning("Erreur vérification item %d: %s", listing.vinted_id, e)
+
+    db.commit()
+
+    result = {
+        "checked": len(candidates),
+        "reset": reset_count,
+        "confirmed_sold": confirmed_count,
+        "errors": error_count,
+    }
+    log_to_db("INFO", "api", f"verify-sold : {reset_count} réinitialisés, {confirmed_count} confirmés", result)
+    return result
+
+
 @app.post("/api/admin/reset-and-rematch", status_code=202)
 def reset_and_rematch(db: Session = Depends(get_db)):
     """Remet product_model_id à NULL sur tous les listings puis relance le rematch."""
@@ -301,6 +398,18 @@ def debug_scrape(q: str = "lemaire", db: Session = Depends(get_db)):
             items = data.get("items") or []
             result["items_count"] = len(items)
             result["sample_titles"] = [i.get("title") for i in items[:3]]
+            if items:
+                first = items[0]
+                # Champs utiles pour diagnostiquer le statut vendu
+                result["first_item_sold_fields"] = {
+                    "id": first.get("id"),
+                    "can_be_sold": first.get("can_be_sold"),
+                    "is_sold": first.get("is_sold"),
+                    "status": first.get("status"),
+                    "reservation_id": first.get("reservation_id"),
+                    "transaction": first.get("transaction"),
+                    "all_keys": list(first.keys()),
+                }
         else:
             result["body_snippet"] = r1.text[:400]
     except Exception as e:
