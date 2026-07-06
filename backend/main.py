@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import logging
-from fastapi import FastAPI, Depends, Query
+from fastapi import FastAPI, Depends, Query, BackgroundTasks
 
 logger = logging.getLogger("vinted.main")
 from fastapi.middleware.cors import CORSMiddleware
@@ -163,12 +163,29 @@ def get_logs(
 
 
 @app.post("/api/admin/verify-sold", status_code=202)
-def verify_sold_listings(db: Session = Depends(get_db)):
+def verify_sold_listings(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     """
-    Vérifie chaque listing marqué comme vendu récemment (60j) via l'API Vinted.
-    Réinitialise les faux positifs (items encore actifs sur Vinted).
-    Traite max 100 listings avec délai anti-bot.
+    Lance en arrière-plan la vérification des listings marqués vendus via l'API Vinted.
+    Retourne immédiatement, résultat dans les logs.
     """
+    from database.connection import SessionLocal
+
+    def _run_verify():
+        _db = SessionLocal()
+        try:
+            _do_verify_sold(_db)
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_verify)
+    return {"status": "verify_started", "message": "Vérification en arrière-plan — résultat dans /api/logs"}
+
+
+def _do_verify_sold(db):
+    """Vérification effective des listings vendus — exécuté en background."""
     from datetime import timedelta
     import time, random
 
@@ -278,7 +295,6 @@ def verify_sold_listings(db: Session = Depends(get_db)):
     result["errors"] = error_count
     result["status_codes"] = status_counts
     log_to_db("INFO", "api", f"verify-sold : {reset_count} réinitialisés, {confirmed_count} confirmés", result)
-    return result
 
 
 @app.post("/api/admin/reset-and-rematch", status_code=202)
