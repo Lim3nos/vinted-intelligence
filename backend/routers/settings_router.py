@@ -94,18 +94,18 @@ def update_vinted_session(body: VintedSessionBody, db: Session = Depends(get_db)
         raise HTTPException(400, f"access_token déjà expiré depuis {now_ts - exp}s — copiez un token frais depuis votre navigateur")
 
     minutes_left = (exp - now_ts) // 60
+    # Stockage dans vinted_auth (table dédiée, colonnes nullable)
     db.execute(
-        text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_access_token'"),
+        text("INSERT INTO vinted_auth (key, value, updated_at) VALUES ('access_token', :v, NOW()) ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=NOW()"),
         {"v": body.access_token},
     )
     db.execute(
-        text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_token_expires_at'"),
+        text("INSERT INTO vinted_auth (key, value, updated_at) VALUES ('expires_at', :v, NOW()) ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=NOW()"),
         {"v": str(exp)},
     )
     if body.refresh_token:
-        ref_exp = _decode_jwt_exp(body.refresh_token)
         db.execute(
-            text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_refresh_token'"),
+            text("INSERT INTO vinted_auth (key, value, updated_at) VALUES ('refresh_token', :v, NOW()) ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=NOW()"),
             {"v": body.refresh_token},
         )
     db.commit()
@@ -122,15 +122,13 @@ def update_vinted_session(body: VintedSessionBody, db: Session = Depends(get_db)
 @router.get("/api/settings/vinted-session")
 def get_vinted_session_status(db: Session = Depends(get_db)):
     """Retourne le statut du token Vinted stocké (validité, expiration)."""
-    rows = db.execute(
-        text("SELECT key, value, updated_at FROM system_settings WHERE key IN ('vinted_access_token','vinted_refresh_token','vinted_token_expires_at')")
-    ).fetchall()
+    rows = db.execute(text("SELECT key, value FROM vinted_auth")).fetchall()
     data = {r.key: r.value for r in rows}
-    exp_ts = int(data.get("vinted_token_expires_at") or 0)
+    exp_ts = int(data.get("expires_at") or 0)
     now_ts = int(time.time())
     return {
-        "has_access_token": bool(data.get("vinted_access_token")),
-        "has_refresh_token": bool(data.get("vinted_refresh_token")),
+        "has_access_token": bool(data.get("access_token")),
+        "has_refresh_token": bool(data.get("refresh_token")),
         "token_valid": exp_ts > now_ts,
         "expires_in_seconds": max(0, exp_ts - now_ts) if exp_ts else None,
         "expires_in_minutes": max(0, (exp_ts - now_ts) // 60) if exp_ts else None,

@@ -35,32 +35,25 @@ async def lifespan(app: FastAPI):
     # Migrations : s'assurer que les colonnes récentes existent
     from database.connection import SessionLocal as _SL
     _db_mig = _SL()
-    try:
-        _db_mig.execute(text(
-            "ALTER TABLE product_models ADD COLUMN IF NOT EXISTS "
-            "search_variants JSONB DEFAULT '[]'::jsonb"
-        ))
-        _db_mig.execute(text(
-            "ALTER TABLE searches ADD COLUMN IF NOT EXISTS "
-            "extra_params JSONB DEFAULT '{}'::jsonb"
-        ))
-        _db_mig.execute(text(
-            "ALTER TABLE searches ADD COLUMN IF NOT EXISTS "
-            "raw_vinted_url TEXT"
-        ))
-        _db_mig.execute(text(
-            "INSERT INTO system_settings (key, value, value_type, default_value, description, updated_at) "
-            "VALUES "
-            "  ('vinted_access_token', NULL, 'text', NULL, 'Token JWT access_token_web (2h)', NOW()), "
-            "  ('vinted_refresh_token', NULL, 'text', NULL, 'Token JWT refresh_token_web (30j)', NOW()), "
-            "  ('vinted_token_expires_at', NULL, 'integer', NULL, 'Expiry Unix timestamp', NOW()) "
-            "ON CONFLICT (key) DO NOTHING"
-        ))
-        _db_mig.commit()
-    except Exception:
-        _db_mig.rollback()
-    finally:
-        _db_mig.close()
+    # Chaque migration dans son propre try/except pour isolation
+    for migration_sql in [
+        "ALTER TABLE product_models ADD COLUMN IF NOT EXISTS search_variants JSONB DEFAULT '[]'::jsonb",
+        "ALTER TABLE searches ADD COLUMN IF NOT EXISTS extra_params JSONB DEFAULT '{}'::jsonb",
+        "ALTER TABLE searches ADD COLUMN IF NOT EXISTS raw_vinted_url TEXT",
+        # Table dédiée tokens auth Vinted (nullable, sans contraintes strictes)
+        """CREATE TABLE IF NOT EXISTS vinted_auth (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "INSERT INTO vinted_auth (key, value) VALUES ('access_token', NULL), ('refresh_token', NULL), ('expires_at', NULL) ON CONFLICT (key) DO NOTHING",
+    ]:
+        try:
+            _db_mig.execute(text(migration_sql))
+            _db_mig.commit()
+        except Exception:
+            _db_mig.rollback()
+    _db_mig.close()
 
     from scheduler import setup_scheduler
     from database.connection import SessionLocal

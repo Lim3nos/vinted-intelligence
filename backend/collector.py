@@ -100,17 +100,12 @@ def _get_auth_token(db: Optional[Session] = None) -> Optional[str]:
         return _auth_token_cache if _auth_token_cache and _auth_token_expires_at > now_ts else None
 
     try:
-        rows = db.execute(
-            text(
-                "SELECT key, value FROM system_settings "
-                "WHERE key IN ('vinted_access_token','vinted_refresh_token','vinted_token_expires_at')"
-            )
-        ).fetchall()
+        rows = db.execute(text("SELECT key, value FROM vinted_auth")).fetchall()
         data = {r.key: r.value for r in rows}
 
-        access_tok = data.get("vinted_access_token")
-        refresh_tok = data.get("vinted_refresh_token")
-        exp_str = data.get("vinted_token_expires_at")
+        access_tok = data.get("access_token")
+        refresh_tok = data.get("refresh_token")
+        exp_str = data.get("expires_at")
         exp_ts = int(exp_str) if exp_str else 0
 
         # Token encore valide
@@ -124,11 +119,11 @@ def _get_auth_token(db: Optional[Session] = None) -> Optional[str]:
             new_token, new_exp = _try_refresh_token(refresh_tok)
             if new_token and new_exp:
                 db.execute(
-                    text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_access_token'"),
+                    text("INSERT INTO vinted_auth (key, value, updated_at) VALUES ('access_token', :v, NOW()) ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=NOW()"),
                     {"v": new_token},
                 )
                 db.execute(
-                    text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_token_expires_at'"),
+                    text("INSERT INTO vinted_auth (key, value, updated_at) VALUES ('expires_at', :v, NOW()) ON CONFLICT (key) DO UPDATE SET value=:v, updated_at=NOW()"),
                     {"v": str(new_exp)},
                 )
                 db.commit()
