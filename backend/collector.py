@@ -176,63 +176,69 @@ def _try_refresh_token(refresh_token: str) -> Tuple[Optional[str], Optional[int]
     return None, None
 
 
-def _check_item_sold_via_detail(vinted_id: int, db: Optional[Session] = None) -> Optional[bool]:
+def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
     """
-    Vérifie le statut vendu via l'API item detail authentifiée.
-    Requiert un access_token_web valide (scope=user) stocké en DB.
+    Vérifie le statut vendu en scrapant la page HTML publique de l'item.
+
+    Vinted est un SPA React qui embarque l'état initial en JSON dans le HTML.
+    Le champ 'is_closed' (True=vendu) est accessible sans auth dans ce JSON.
+    Fonctionne depuis Railway sans auth, sur tous les items publics.
 
     Returns:
-        True  → item vendu (can_be_sold=false ou is_closed=true)
-        False → item encore actif (can_be_sold=true)
-        None  → vérification impossible (pas de token, erreur, rate limit)
+        True  → item vendu (is_closed=true ou page 404)
+        False → item encore actif (is_closed=false)
+        None  → vérification impossible (erreur réseau, timeout, 429)
     """
-    token = _get_auth_token(db)
-    if not token:
-        return None
-
     try:
         session = _get_curl_session()
-        # Injecter le token authentifié dans la session anonyme existante
-        session.cookies.set("access_token_web", token, domain="www.vinted.fr")
-
         resp = session.get(
-            f"{BASE_URL}/api/v2/items/{vinted_id}",
+            f"{BASE_URL}/items/{vinted_id}",
             headers={
-                **_API_HEADERS,
-                "Referer": f"{BASE_URL}/items/{vinted_id}",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+                "Referer": BASE_URL + "/catalog",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
             },
-            timeout=12,
+            timeout=20,
         )
 
         if resp.status_code == 429:
             return None
-        if resp.status_code == 401:
-            # Token révoqué → invalider le cache
-            global _auth_token_cache, _auth_token_expires_at
-            _auth_token_cache = None
-            _auth_token_expires_at = 0
-            return None
         if resp.status_code == 404:
-            # Item supprimé → vendu (ou retiré)
-            return True
+            return True   # page introuvable = item supprimé/vendu
         if resp.status_code != 200:
             return None
 
-        item = resp.json().get("item", {})
-        # can_be_sold=false → vendu ; is_closed=true → vendu
-        can_be_sold = item.get("can_be_sold")
-        is_closed = item.get("is_closed")
+        # Extraire is_closed depuis le JSON embarqué dans le HTML.
+        # Vinted sérialise parfois en JSON échappé (\"is_closed\") dans les scripts,
+        # parfois en JSON brut ("is_closed") — les deux patterns doivent être testés.
+        for pattern in (
+            r'"is_closed"\s*:\s*(true|false)',       # JSON brut
+            r'\\"is_closed\\"\s*:\s*(true|false)',   # JSON échappé dans attribut HTML
+            r'is_closed.{0,8}(true|false)',           # loose match
+        ):
+            m = re.search(pattern, resp.text)
+            if m:
+                return m.group(1) == "true"
 
-        if is_closed is True:
-            return True
-        if can_be_sold is False:
-            return True
-        if can_be_sold is True:
-            return False
+        # Fallback : chercher can_be_sold
+        for pattern2 in (
+            r'"can_be_sold"\s*:\s*(true|false)',
+            r'\\"can_be_sold\\"\s*:\s*(true|false)',
+            r'can_be_sold.{0,8}(true|false)',
+        ):
+            m2 = re.search(pattern2, resp.text)
+            if m2:
+                can_be_sold = m2.group(1) == "true"
+                return not can_be_sold  # can_be_sold=false → vendu=True
+
+        logger.debug("HTML item %s: is_closed non trouvé dans %d bytes", vinted_id, len(resp.text))
         return None
 
     except Exception as e:
-        logger.debug("Erreur item detail check %s: %s", vinted_id, e)
+        logger.debug("Erreur HTML item check %s: %s", vinted_id, e)
         return None
 
 
@@ -911,20 +917,21 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             ).fetchone()
 
             if updated and updated.consecutive_absences >= 4:
-                # Priorité 1 : item detail authentifiée (précis, zéro faux positif)
-                if has_auth_token:
-                    detail_result = _check_item_sold_via_detail(row.vinted_id, db)
-                    if detail_result is False:
+                # Priorité 1 : page HTML item (is_closed dans JSON embarqué, sans auth)
+                if verify_budget > 0:
+                    html_result = _check_item_sold_via_html(row.vinted_id)
+                    verify_budget -= 1
+                    if html_result is False:
                         # Item encore actif → reset absences
                         db.execute(
                             text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
                             {"lid": row.id},
                         )
                         continue
-                    if detail_result is True:
+                    if html_result is True:
                         item_gone = True
                     else:
-                        # detail_result=None → auth fail, fallback catalog
+                        # html_result=None → erreur réseau, fallback catalog
                         item_still_active = None
                         if verify_budget > 0:
                             item_still_active = _check_seller_still_has_item(
@@ -938,22 +945,9 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             )
                             continue
                         item_gone = (item_still_active is False) or (updated.consecutive_absences >= 8)
-
                 else:
-                    # Priorité 2 : catalog du vendeur (anonyme)
-                    item_still_active = None
-                    if verify_budget > 0:
-                        item_still_active = _check_seller_still_has_item(
-                            row.vinted_id, row.seller_id, row.title or ""
-                        )
-                        verify_budget -= 1
-                    if item_still_active is True:
-                        db.execute(
-                            text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
-                            {"lid": row.id},
-                        )
-                        continue
-                    item_gone = (item_still_active is False) or (updated.consecutive_absences >= 8)
+                    # Budget épuisé → fallback absences uniquement
+                    item_gone = updated.consecutive_absences >= 8
 
                 if item_gone:
                     first_seen = updated.first_seen_at

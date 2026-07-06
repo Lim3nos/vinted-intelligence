@@ -195,12 +195,11 @@ def verify_sold_listings(
 
 def _do_verify_sold(db):
     """
-    Vérification effective des listings vendus via catalog du vendeur — exécuté en background.
+    Vérification effective des listings vendus via page HTML item — exécuté en background.
 
-    Méthode : recherche catalog/items?user_id={seller_id}&search_text={mots_titre}
-    Si l'item est encore dans le catalog du vendeur → faux positif → reset.
-    Si non trouvé → confirmer comme vendu.
-    L'API catalog est publique (pas besoin d'auth), contrairement à l'API item detail.
+    Méthode : scrape /items/{id} → extrait is_closed depuis JSON embarqué dans le HTML.
+    Fonctionne sans auth, retourne le vrai statut is_closed.
+    Fallback sur catalog vendeur si la page HTML échoue (timeout, 429).
     """
     from datetime import timedelta
     import time, random
@@ -214,7 +213,6 @@ def _do_verify_sold(db):
             FROM listings
             WHERE is_sold = true
               AND disappeared_at >= :cutoff
-              AND seller_id IS NOT NULL
             ORDER BY disappeared_at DESC
             LIMIT 100
             """
@@ -226,7 +224,7 @@ def _do_verify_sold(db):
         log_to_db("INFO", "api", "verify-sold : aucun candidat trouvé")
         return
 
-    from collector import _check_seller_still_has_item
+    from collector import _check_item_sold_via_html, _check_seller_still_has_item
 
     reset_count = 0
     confirmed_count = 0
@@ -234,12 +232,21 @@ def _do_verify_sold(db):
 
     for listing in candidates:
         try:
-            item_still_active = _check_seller_still_has_item(
-                listing.vinted_id, listing.seller_id, listing.title or ""
-            )
+            # Méthode 1 : page HTML item (is_closed exact)
+            time.sleep(random.uniform(1.0, 2.5))
+            result = _check_item_sold_via_html(listing.vinted_id)
 
-            if item_still_active is True:
-                # Item trouvé dans le catalog du vendeur → encore actif → reset
+            # Fallback méthode 2 : catalog vendeur
+            if result is None and listing.seller_id:
+                result_catalog = _check_seller_still_has_item(
+                    listing.vinted_id, listing.seller_id, listing.title or ""
+                )
+                # catalog: True=actif → pas vendu ; False=absent → vendu
+                result = (not result_catalog) if result_catalog is not None else None
+
+            # result: True=vendu, False=encore actif, None=inconnu
+            if result is False:
+                # Item encore actif → c'était un faux positif → reset
                 db.execute(
                     text(
                         """
@@ -256,11 +263,11 @@ def _do_verify_sold(db):
                     {"lid": listing.id},
                 )
                 reset_count += 1
-            elif item_still_active is False:
-                # Non trouvé → confirmer vendu
+            elif result is True:
+                # Confirmé vendu (is_closed=true ou page 404)
                 confirmed_count += 1
             else:
-                # Vérification impossible (rate limit, erreur) → ne pas toucher
+                # Vérification impossible (timeout, 429, parse error) → ne pas toucher
                 skipped_count += 1
 
         except Exception as e:
