@@ -1,6 +1,10 @@
 """Router pour les paramètres calibrables et les actions admin."""
 
+import base64
+import json
 import time
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -50,3 +54,84 @@ def recalculate_scores(db: Session = Depends(get_db)):
         {"recalculated": count, "duration_seconds": duration},
     )
     return {"recalculated_models": count, "duration_seconds": duration}
+
+
+# ---------------------------------------------------------------------------
+# Gestion du token Vinted authentifié (access_token_web + refresh_token_web)
+# ---------------------------------------------------------------------------
+
+def _decode_jwt_exp(token: str) -> Optional[int]:
+    """Extrait l'expiration (Unix timestamp) d'un JWT sans validation de signature."""
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = json.loads(base64.b64decode(padded))
+        return payload.get("exp")
+    except Exception:
+        return None
+
+
+class VintedSessionBody(BaseModel):
+    access_token: str
+    refresh_token: Optional[str] = None
+
+
+@router.put("/api/settings/vinted-session")
+def update_vinted_session(body: VintedSessionBody, db: Session = Depends(get_db)):
+    """
+    Stocke les tokens Vinted authentifiés (access_token_web + optionnel refresh_token_web).
+    Appelez cet endpoint en collant les valeurs depuis les cookies navigateur (DevTools → Application).
+    Le access_token a une durée de vie de ~2h ; le refresh_token dure ~30j.
+    """
+    exp = _decode_jwt_exp(body.access_token)
+    if exp is None:
+        raise HTTPException(400, "access_token invalide (JWT mal formé)")
+
+    now_ts = int(time.time())
+    if exp <= now_ts:
+        raise HTTPException(400, f"access_token déjà expiré depuis {now_ts - exp}s — copiez un token frais depuis votre navigateur")
+
+    minutes_left = (exp - now_ts) // 60
+    db.execute(
+        text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_access_token'"),
+        {"v": body.access_token},
+    )
+    db.execute(
+        text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_token_expires_at'"),
+        {"v": str(exp)},
+    )
+    if body.refresh_token:
+        ref_exp = _decode_jwt_exp(body.refresh_token)
+        db.execute(
+            text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_refresh_token'"),
+            {"v": body.refresh_token},
+        )
+    db.commit()
+
+    log_to_db("INFO", "api", f"Token Vinted mis à jour — expire dans {minutes_left} min",
+              {"exp": exp, "has_refresh": body.refresh_token is not None})
+    return {
+        "status": "ok",
+        "expires_in_minutes": minutes_left,
+        "has_refresh_token": body.refresh_token is not None,
+    }
+
+
+@router.get("/api/settings/vinted-session")
+def get_vinted_session_status(db: Session = Depends(get_db)):
+    """Retourne le statut du token Vinted stocké (validité, expiration)."""
+    rows = db.execute(
+        text("SELECT key, value, updated_at FROM system_settings WHERE key IN ('vinted_access_token','vinted_refresh_token','vinted_token_expires_at')")
+    ).fetchall()
+    data = {r.key: r.value for r in rows}
+    exp_ts = int(data.get("vinted_token_expires_at") or 0)
+    now_ts = int(time.time())
+    return {
+        "has_access_token": bool(data.get("vinted_access_token")),
+        "has_refresh_token": bool(data.get("vinted_refresh_token")),
+        "token_valid": exp_ts > now_ts,
+        "expires_in_seconds": max(0, exp_ts - now_ts) if exp_ts else None,
+        "expires_in_minutes": max(0, (exp_ts - now_ts) // 60) if exp_ts else None,
+    }

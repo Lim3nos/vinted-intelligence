@@ -12,7 +12,7 @@ import logging
 import unicodedata
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Tuple
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -32,6 +32,10 @@ BASE_URL = os.environ.get("VINTED_BASE_URL", "https://www.vinted.fr")
 _curl_session: Optional[CurlSession] = None
 _cookie_fetched_at: Optional[float] = None
 _COOKIE_TTL_SECONDS = 10 * 3600  # renouveler le cookie toutes les 10h
+
+# Cache in-process du token Vinted authentifié
+_auth_token_cache: Optional[str] = None
+_auth_token_expires_at: int = 0
 
 
 def _get_curl_session() -> CurlSession:
@@ -71,6 +75,170 @@ def _get_curl_session() -> CurlSession:
         _curl_session = session
 
     return _curl_session
+
+
+# ---------------------------------------------------------------------------
+# Auth Vinted (token utilisateur authentifié)
+# ---------------------------------------------------------------------------
+
+def _get_auth_token(db: Optional[Session] = None) -> Optional[str]:
+    """
+    Retourne le access_token_web authentifié stocké en DB s'il est valide.
+    Cache in-process pour éviter une requête DB à chaque appel.
+    Si le refresh_token_web est disponible, tente un renouvellement automatique.
+    Retourne None si aucun token valide disponible.
+    """
+    global _auth_token_cache, _auth_token_expires_at
+
+    now_ts = int(time.time())
+
+    # Cache in-process valide (garde une marge de 60s)
+    if _auth_token_cache and _auth_token_expires_at > now_ts + 60:
+        return _auth_token_cache
+
+    if db is None:
+        return _auth_token_cache if _auth_token_cache and _auth_token_expires_at > now_ts else None
+
+    try:
+        rows = db.execute(
+            text(
+                "SELECT key, value FROM system_settings "
+                "WHERE key IN ('vinted_access_token','vinted_refresh_token','vinted_token_expires_at')"
+            )
+        ).fetchall()
+        data = {r.key: r.value for r in rows}
+
+        access_tok = data.get("vinted_access_token")
+        refresh_tok = data.get("vinted_refresh_token")
+        exp_str = data.get("vinted_token_expires_at")
+        exp_ts = int(exp_str) if exp_str else 0
+
+        # Token encore valide
+        if access_tok and exp_ts > now_ts + 60:
+            _auth_token_cache = access_tok
+            _auth_token_expires_at = exp_ts
+            return access_tok
+
+        # Token expiré mais refresh_token disponible → cookie rotation
+        if refresh_tok and exp_ts > 0:
+            new_token, new_exp = _try_refresh_token(refresh_tok)
+            if new_token and new_exp:
+                db.execute(
+                    text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_access_token'"),
+                    {"v": new_token},
+                )
+                db.execute(
+                    text("UPDATE system_settings SET value = :v, updated_at = NOW() WHERE key = 'vinted_token_expires_at'"),
+                    {"v": str(new_exp)},
+                )
+                db.commit()
+                _auth_token_cache = new_token
+                _auth_token_expires_at = new_exp
+                logger.info("Token Vinted renouvelé automatiquement via refresh_token")
+                return new_token
+
+    except Exception as e:
+        logger.debug("Erreur lecture token auth : %s", e)
+
+    return None
+
+
+def _try_refresh_token(refresh_token: str) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Tente de renouveler l'access_token via cookie rotation Vinted.
+    Envoie une requête à la homepage avec refresh_token_web → Vinted retourne
+    un nouveau access_token_web dans Set-Cookie si le refresh token est valide.
+    Retourne (new_access_token, exp_timestamp) ou (None, None).
+    """
+    try:
+        s = CurlSession(impersonate="chrome")
+        s.cookies.set("refresh_token_web", refresh_token, domain="www.vinted.fr")
+        resp = s.get(
+            BASE_URL + "/",
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+            },
+            timeout=15,
+        )
+        new_tok = resp.cookies.get("access_token_web")
+        if not new_tok:
+            return None, None
+
+        # Décoder l'expiration du nouveau JWT
+        import base64 as _b64, json as _json
+        parts = new_tok.split(".")
+        if len(parts) >= 2:
+            pad = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            payload = _json.loads(_b64.b64decode(pad))
+            exp = payload.get("exp")
+            scope = payload.get("scope", "")
+            # Vérifier que c'est un token user (pas anonyme)
+            if scope == "user" and exp:
+                return new_tok, exp
+    except Exception as e:
+        logger.debug("Erreur refresh token : %s", e)
+    return None, None
+
+
+def _check_item_sold_via_detail(vinted_id: int, db: Optional[Session] = None) -> Optional[bool]:
+    """
+    Vérifie le statut vendu via l'API item detail authentifiée.
+    Requiert un access_token_web valide (scope=user) stocké en DB.
+
+    Returns:
+        True  → item vendu (can_be_sold=false ou is_closed=true)
+        False → item encore actif (can_be_sold=true)
+        None  → vérification impossible (pas de token, erreur, rate limit)
+    """
+    token = _get_auth_token(db)
+    if not token:
+        return None
+
+    try:
+        session = _get_curl_session()
+        # Injecter le token authentifié dans la session anonyme existante
+        session.cookies.set("access_token_web", token, domain="www.vinted.fr")
+
+        resp = session.get(
+            f"{BASE_URL}/api/v2/items/{vinted_id}",
+            headers={
+                **_API_HEADERS,
+                "Referer": f"{BASE_URL}/items/{vinted_id}",
+            },
+            timeout=12,
+        )
+
+        if resp.status_code == 429:
+            return None
+        if resp.status_code == 401:
+            # Token révoqué → invalider le cache
+            global _auth_token_cache, _auth_token_expires_at
+            _auth_token_cache = None
+            _auth_token_expires_at = 0
+            return None
+        if resp.status_code == 404:
+            # Item supprimé → vendu (ou retiré)
+            return True
+        if resp.status_code != 200:
+            return None
+
+        item = resp.json().get("item", {})
+        # can_be_sold=false → vendu ; is_closed=true → vendu
+        can_be_sold = item.get("can_be_sold")
+        is_closed = item.get("is_closed")
+
+        if is_closed is True:
+            return True
+        if can_be_sold is False:
+            return True
+        if can_be_sold is True:
+            return False
+        return None
+
+    except Exception as e:
+        logger.debug("Erreur item detail check %s: %s", vinted_id, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +632,17 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     if search.price_max is not None:
         scraper_params["price_to"] = search.price_max
 
+    # Paramètres extra issus d'une URL Vinted (status_ids, size_ids, color_ids, etc.)
+    try:
+        import json as _json
+        extra = search.extra_params
+        if isinstance(extra, str):
+            extra = _json.loads(extra)
+        if isinstance(extra, dict):
+            scraper_params.update(extra)
+    except Exception:
+        pass
+
     items = safe_request_paginated(scraper_params, max_pages=5)
 
     # 3. Erreur réseau → abandonner sans toucher aux données existantes
@@ -721,6 +900,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     ).fetchall()
 
     verify_budget = 12  # max vérifications catalog par snapshot (anti rate-limit)
+    has_auth_token = bool(_get_auth_token(db))  # check une seule fois
     for row in active_in_db:
         if row.vinted_id not in scraped_vinted_ids:
             updated = db.execute(
@@ -736,28 +916,49 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             ).fetchone()
 
             if updated and updated.consecutive_absences >= 4:
-                # Vérifier via catalog du vendeur avant de marquer vendu
-                item_still_active = None
-                if verify_budget > 0:
-                    item_still_active = _check_seller_still_has_item(
-                        row.vinted_id, row.seller_id, row.title or ""
-                    )
-                    verify_budget -= 1
+                # Priorité 1 : item detail authentifiée (précis, zéro faux positif)
+                if has_auth_token:
+                    detail_result = _check_item_sold_via_detail(row.vinted_id, db)
+                    if detail_result is False:
+                        # Item encore actif → reset absences
+                        db.execute(
+                            text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
+                            {"lid": row.id},
+                        )
+                        continue
+                    if detail_result is True:
+                        item_gone = True
+                    else:
+                        # detail_result=None → auth fail, fallback catalog
+                        item_still_active = None
+                        if verify_budget > 0:
+                            item_still_active = _check_seller_still_has_item(
+                                row.vinted_id, row.seller_id, row.title or ""
+                            )
+                            verify_budget -= 1
+                        if item_still_active is True:
+                            db.execute(
+                                text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
+                                {"lid": row.id},
+                            )
+                            continue
+                        item_gone = (item_still_active is False) or (updated.consecutive_absences >= 8)
 
-                if item_still_active is True:
-                    # Item encore dans le catalog du vendeur → faux positif → reset
-                    db.execute(
-                        text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
-                        {"lid": row.id},
-                    )
-                    continue
-
-                # item_still_active=False → not found → marquer vendu
-                # item_still_active=None → check impossible → fallback sur absences
-                if item_still_active is False:
-                    item_gone = True
                 else:
-                    item_gone = updated.consecutive_absences >= 8
+                    # Priorité 2 : catalog du vendeur (anonyme)
+                    item_still_active = None
+                    if verify_budget > 0:
+                        item_still_active = _check_seller_still_has_item(
+                            row.vinted_id, row.seller_id, row.title or ""
+                        )
+                        verify_budget -= 1
+                    if item_still_active is True:
+                        db.execute(
+                            text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
+                            {"lid": row.id},
+                        )
+                        continue
+                    item_gone = (item_still_active is False) or (updated.consecutive_absences >= 8)
 
                 if item_gone:
                     first_seen = updated.first_seen_at
