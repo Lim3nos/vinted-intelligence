@@ -162,23 +162,31 @@ def create_search_from_url(body: SearchFromUrl, db: Session = Depends(get_db)):
     params = parse_qs(parsed.query, keep_blank_values=False)
 
     def first(key: str) -> Optional[str]:
-        vals = params.get(key)
+        # Vinted encode les arrays sous deux formes : brand_ids=X ou brand_ids[]=X
+        vals = params.get(key) or params.get(key + "[]")
         return vals[0] if vals else None
 
+    def all_vals(key: str) -> list:
+        return params.get(key, []) + params.get(key + "[]", [])
+
     keywords = first("search_text") or ""
-    brand_ids = first("brand_ids")
-    catalog_ids = first("catalog_ids")
+    # Vinted peut envoyer plusieurs brand_ids[] → on les joint par virgule
+    brand_ids_list = all_vals("brand_ids")
+    brand_ids = ",".join(brand_ids_list) if brand_ids_list else None
+    catalog_ids_list = all_vals("catalog_ids")
+    catalog_ids = ",".join(catalog_ids_list) if catalog_ids_list else None
 
     # price_from / price_to dans l'URL Vinted override les valeurs du body
     price_min = int(first("price_from") or body.price_min)
     price_max = int(first("price_to") or body.price_max)
 
     # Paramètres supplémentaires stockés dans extra_params
+    # Gère aussi la forme key[]=val
     extra = {}
     for key in _VINTED_EXTRA_PARAM_KEYS:
-        val = first(key)
-        if val:
-            extra[key] = val
+        vals = all_vals(key)
+        if vals:
+            extra[key] = ",".join(vals)
 
     # Générer un nom auto si non fourni
     name = body.name
