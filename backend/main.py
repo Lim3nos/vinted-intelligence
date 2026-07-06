@@ -441,16 +441,47 @@ def debug_scrape(q: str = "lemaire", db: Session = Depends(get_db)):
             result["sample_titles"] = [i.get("title") for i in items[:3]]
             if items:
                 first = items[0]
-                # Champs utiles pour diagnostiquer le statut vendu
                 result["first_item_sold_fields"] = {
                     "id": first.get("id"),
                     "can_be_sold": first.get("can_be_sold"),
                     "is_sold": first.get("is_sold"),
                     "status": first.get("status"),
-                    "reservation_id": first.get("reservation_id"),
-                    "transaction": first.get("transaction"),
                     "all_keys": list(first.keys()),
                 }
+                # Étape 3 : tester l'item detail sur le 1er item du catalog
+                # Pour savoir si l'API detail est accessible (auth suffisante)
+                first_id = first.get("id")
+                if first_id:
+                    time.sleep(random.uniform(1.5, 2.5))
+                    try:
+                        r2 = session.get(
+                            f"{base_url}/api/v2/items/{first_id}",
+                            headers={
+                                "Accept": "application/json, text/plain, */*",
+                                "Accept-Language": "fr-FR,fr;q=0.9",
+                                "Referer": f"{base_url}/items/{first_id}",
+                                "Origin": base_url,
+                            },
+                            timeout=12,
+                        )
+                        result["item_detail_test"] = {
+                            "vinted_id": first_id,
+                            "status": r2.status_code,
+                        }
+                        if r2.status_code == 200:
+                            det = r2.json().get("item", {})
+                            result["item_detail_test"]["sold_fields"] = {
+                                k: det.get(k) for k in [
+                                    "is_closed", "item_closing_action", "badge",
+                                    "can_buy", "can_be_sold", "is_reserved",
+                                    "is_hidden", "is_visible", "status",
+                                ]
+                            }
+                            result["item_detail_test"]["all_keys"] = list(det.keys())
+                        else:
+                            result["item_detail_test"]["body"] = r2.text[:200]
+                    except Exception as e2:
+                        result["item_detail_test"] = {"error": str(e2)}
         else:
             result["body_snippet"] = r1.text[:400]
     except Exception as e:
