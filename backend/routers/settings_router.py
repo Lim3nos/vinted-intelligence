@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from sqlalchemy import text
+
 from database.connection import get_db
 from settings import update_settings, reset_all_settings, _fetch_all_settings
 from analyzer import recalculate_all_scores
