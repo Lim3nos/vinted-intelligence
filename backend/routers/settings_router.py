@@ -122,14 +122,20 @@ def update_vinted_session(body: VintedSessionBody, db: Session = Depends(get_db)
 @router.get("/api/settings/vinted-session")
 def get_vinted_session_status(db: Session = Depends(get_db)):
     """Retourne le statut du token Vinted stocké (validité, expiration)."""
-    rows = db.execute(text("SELECT key, value FROM vinted_auth")).fetchall()
-    data = {r.key: r.value for r in rows}
-    exp_ts = int(data.get("expires_at") or 0)
-    now_ts = int(time.time())
-    return {
-        "has_access_token": bool(data.get("access_token")),
-        "has_refresh_token": bool(data.get("refresh_token")),
-        "token_valid": exp_ts > now_ts,
-        "expires_in_seconds": max(0, exp_ts - now_ts) if exp_ts else None,
-        "expires_in_minutes": max(0, (exp_ts - now_ts) // 60) if exp_ts else None,
-    }
+    try:
+        rows = db.execute(text("SELECT key, value FROM vinted_auth")).fetchall()
+        data = {r.key: r.value for r in rows}
+        exp_ts = int(data.get("expires_at") or 0)
+        now_ts = int(time.time())
+        return {
+            "has_access_token": bool(data.get("access_token")),
+            "has_refresh_token": bool(data.get("refresh_token")),
+            "token_valid": exp_ts > now_ts,
+            "expires_in_seconds": max(0, exp_ts - now_ts) if exp_ts else None,
+            "expires_in_minutes": max(0, (exp_ts - now_ts) // 60) if exp_ts else None,
+        }
+    except Exception as e:
+        import traceback
+        detail = traceback.format_exc()
+        log_to_db("ERROR", "api", f"vinted-session status error: {e}", {"traceback": detail})
+        raise HTTPException(500, f"Erreur interne: {e}")
