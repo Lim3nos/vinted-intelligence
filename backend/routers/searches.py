@@ -214,7 +214,7 @@ def create_search_from_url(body: SearchFromUrl, db: Session = Depends(get_db)):
             """
         ),
         {
-            "name": name, "stype": search_type, "kw": keywords or None,
+            "name": name, "stype": search_type, "kw": keywords,
             "bids": brand_ids, "cids": catalog_ids,
             "pmin": price_min, "pmax": price_max,
             "interval": body.snapshot_interval_hours,
