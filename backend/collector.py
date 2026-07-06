@@ -316,32 +316,57 @@ def _detect_brand_in_title(title_normalized: str, brand: Optional[str]) -> bool:
     return False
 
 
-def _verify_item_gone(vinted_id: int) -> bool:
+def _extract_title_keywords(title: str) -> str:
+    """Extrait 3 mots clés distinctifs du titre pour la recherche catalog."""
+    if not title:
+        return ""
+    t = title.lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    words = [w for w in t.split() if len(w) >= 3]
+    return " ".join(words[:3])
+
+
+def _check_seller_still_has_item(vinted_id: int, seller_id: Optional[int], title: str) -> Optional[bool]:
     """
-    Vérifie via l'API Vinted si un item est réellement vendu/supprimé.
-    Retourne True si disparu/vendu, False si encore actif.
-    Conservateur : en cas d'erreur, retourne False (ne pas marquer vendu par erreur).
+    Vérifie si l'item est encore dans le catalogue public du vendeur.
+
+    Recherche ciblée : catalog/items?user_id={seller_id}&search_text={mots_titre}
+    L'API catalog est accessible anonymement — contrairement à l'API item detail.
+
+    Returns:
+        True  → item trouvé dans le catalog du vendeur → encore actif, ne pas marquer vendu
+        False → item non trouvé → probablement vendu ou retiré
+        None  → vérification impossible (rate limit, erreur, seller_id manquant) → conservateur
     """
-    import time, random
+    if not seller_id:
+        return None
+    search_words = _extract_title_keywords(title)
+    if not search_words:
+        return None
     try:
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(0.5, 1.5))
         session = _get_curl_session()
         resp = session.get(
-            f"{BASE_URL}/api/v2/items/{vinted_id}",
-            headers={**_API_HEADERS, "Referer": f"{BASE_URL}/items/{vinted_id}"},
-            timeout=10,
+            f"{BASE_URL}/api/v2/catalog/items",
+            params={
+                "user_id": seller_id,
+                "search_text": search_words,
+                "per_page": 96,
+                "page": 1,
+                "order": "newest_first",
+            },
+            headers={**_API_HEADERS, "Referer": f"{BASE_URL}/member/{seller_id}/items"},
+            timeout=15,
         )
-        if resp.status_code == 404:
-            return True  # item supprimé
-        if resp.status_code == 200:
-            data = resp.json()
-            item = data.get("item") or data
-            can_be_sold = item.get("can_be_sold")
-            # Vendu/réservé uniquement si explicitement False
-            return can_be_sold is False
-        return False  # autre statut : conservateur
+        if resp.status_code == 429:
+            return None  # Rate limited — conservateur
+        if resp.status_code != 200:
+            return None  # Erreur — conservateur
+        items = resp.json().get("items", [])
+        item_ids = {it.get("id") for it in items}
+        return vinted_id in item_ids
     except Exception:
-        return False
+        return None
 
 
 def _match_model(title_normalized: str, models: list) -> Optional[int]:
@@ -687,7 +712,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     active_in_db = db.execute(
         text(
             """
-            SELECT id, vinted_id, first_seen_at, price
+            SELECT id, vinted_id, first_seen_at, price, seller_id, title
             FROM listings
             WHERE search_id = :sid AND is_sold = false
             """
@@ -695,7 +720,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         {"sid": search_id},
     ).fetchall()
 
-    verify_budget = 15  # max vérifications API par snapshot (anti rate-limit)
+    verify_budget = 12  # max vérifications catalog par snapshot (anti rate-limit)
     for row in active_in_db:
         if row.vinted_id not in scraped_vinted_ids:
             updated = db.execute(
@@ -711,13 +736,27 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             ).fetchone()
 
             if updated and updated.consecutive_absences >= 4:
-                # Vérifier via l'API Vinted avant de marquer vendu
-                item_gone = False
+                # Vérifier via catalog du vendeur avant de marquer vendu
+                item_still_active = None
                 if verify_budget > 0:
-                    item_gone = _verify_item_gone(row.vinted_id)
+                    item_still_active = _check_seller_still_has_item(
+                        row.vinted_id, row.seller_id, row.title or ""
+                    )
                     verify_budget -= 1
+
+                if item_still_active is True:
+                    # Item encore dans le catalog du vendeur → faux positif → reset
+                    db.execute(
+                        text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
+                        {"lid": row.id},
+                    )
+                    continue
+
+                # item_still_active=False → not found → marquer vendu
+                # item_still_active=None → check impossible → fallback sur absences
+                if item_still_active is False:
+                    item_gone = True
                 else:
-                    # Budget épuisé : marquer seulement après beaucoup d'absences
                     item_gone = updated.consecutive_absences >= 8
 
                 if item_gone:

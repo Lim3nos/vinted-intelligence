@@ -185,85 +185,52 @@ def verify_sold_listings(
 
 
 def _do_verify_sold(db):
-    """Vérification effective des listings vendus — exécuté en background."""
+    """
+    Vérification effective des listings vendus via catalog du vendeur — exécuté en background.
+
+    Méthode : recherche catalog/items?user_id={seller_id}&search_text={mots_titre}
+    Si l'item est encore dans le catalog du vendeur → faux positif → reset.
+    Si non trouvé → confirmer comme vendu.
+    L'API catalog est publique (pas besoin d'auth), contrairement à l'API item detail.
+    """
     from datetime import timedelta
     import time, random
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=60)
 
-    # Listings "vendus" récemment, sauf ceux déjà confirmés avec final_price
     candidates = db.execute(
         text(
             """
-            SELECT id, vinted_id, title, disappeared_at
+            SELECT id, vinted_id, title, disappeared_at, seller_id
             FROM listings
             WHERE is_sold = true
               AND disappeared_at >= :cutoff
+              AND seller_id IS NOT NULL
             ORDER BY disappeared_at DESC
-            LIMIT 150
+            LIMIT 100
             """
         ),
         {"cutoff": cutoff},
     ).fetchall()
 
     if not candidates:
-        return {"checked": 0, "reset": 0, "confirmed_sold": 0}
+        log_to_db("INFO", "api", "verify-sold : aucun candidat trouvé")
+        return
 
-    from collector import _get_curl_session, _API_HEADERS, BASE_URL
+    from collector import _check_seller_still_has_item
 
     reset_count = 0
     confirmed_count = 0
-    error_count = 0
-    result: dict = {}
+    skipped_count = 0
 
-    status_counts: dict = {}
     for listing in candidates:
         try:
-            time.sleep(random.uniform(0.8, 1.8))
-            session = _get_curl_session()
-            resp = session.get(
-                f"{BASE_URL}/api/v2/items/{listing.vinted_id}",
-                headers={**_API_HEADERS, "Referer": f"{BASE_URL}/items/{listing.vinted_id}"},
-                timeout=10,
+            item_still_active = _check_seller_still_has_item(
+                listing.vinted_id, listing.seller_id, listing.title or ""
             )
-            sc = resp.status_code
-            status_counts[str(sc)] = status_counts.get(str(sc), 0) + 1
 
-            if sc == 200:
-                data = resp.json()
-                item_data = data.get("item") or {}
-                can_be_sold = item_data.get("can_be_sold")
-                # Conserver les clés utiles pour le premier item inspecté
-                if not result.get("sample_item_keys") and item_data:
-                    result["sample_item_keys"] = list(item_data.keys())[:30]
-                    result["sample_can_be_sold"] = can_be_sold
-
-                if can_be_sold is False:
-                    # Explicitement vendu/réservé
-                    confirmed_count += 1
-                else:
-                    # can_be_sold=null ou true → item encore actif → faux positif
-                    db.execute(
-                        text(
-                            """
-                            UPDATE listings
-                            SET is_sold = false,
-                                disappeared_at = NULL,
-                                time_to_disappear_hours = NULL,
-                                final_price = NULL,
-                                consecutive_absences = 0,
-                                last_seen_at = NOW()
-                            WHERE id = :lid
-                            """
-                        ),
-                        {"lid": listing.id},
-                    )
-                    reset_count += 1
-
-            elif sc == 404:
-                confirmed_count += 1
-            elif sc in (401, 403):
-                # Auth/bloqué — traiter comme encore actif (conservateur)
+            if item_still_active is True:
+                # Item trouvé dans le catalog du vendeur → encore actif → reset
                 db.execute(
                     text(
                         """
@@ -280,21 +247,26 @@ def _do_verify_sold(db):
                     {"lid": listing.id},
                 )
                 reset_count += 1
+            elif item_still_active is False:
+                # Non trouvé → confirmer vendu
+                confirmed_count += 1
             else:
-                error_count += 1
+                # Vérification impossible (rate limit, erreur) → ne pas toucher
+                skipped_count += 1
 
         except Exception as e:
-            error_count += 1
-            logger.warning("Erreur vérification item %d: %s", listing.vinted_id, e)
+            skipped_count += 1
+            logger.warning("Erreur verify-sold item %d: %s", listing.vinted_id, e)
 
     db.commit()
 
-    result["checked"] = len(candidates)
-    result["reset"] = reset_count
-    result["confirmed_sold"] = confirmed_count
-    result["errors"] = error_count
-    result["status_codes"] = status_counts
-    log_to_db("INFO", "api", f"verify-sold : {reset_count} réinitialisés, {confirmed_count} confirmés", result)
+    result = {
+        "checked": len(candidates),
+        "reset": reset_count,
+        "confirmed_sold": confirmed_count,
+        "skipped": skipped_count,
+    }
+    log_to_db("INFO", "api", f"verify-sold : {reset_count} réinitialisés, {confirmed_count} confirmés, {skipped_count} ignorés", result)
 
 
 @app.post("/api/admin/reset-and-rematch", status_code=202)
