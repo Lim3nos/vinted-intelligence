@@ -349,7 +349,7 @@ def rematch_listings(db: Session = Depends(get_db)):
             keywords = raw or []
             if not keywords:
                 continue
-            mandatory = keywords[:2]
+            mandatory = keywords
             if not all(kw.lower() in title for kw in mandatory):
                 continue
             matches = sum(1 for kw in keywords if kw.lower() in title)

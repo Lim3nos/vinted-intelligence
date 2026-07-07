@@ -560,8 +560,8 @@ def _match_model(title_normalized: str, models: list) -> Optional[int]:
         keywords = raw or []
         if not keywords:
             continue
-        # Les 2 premiers keywords sont obligatoires (tous si <= 2 keywords)
-        mandatory = keywords[:2]
+        # Tous les keywords sont obligatoires pour éviter les faux positifs
+        mandatory = keywords
         if not all(kw.lower() in title_normalized for kw in mandatory):
             continue
         matches = sum(1 for kw in keywords if kw.lower() in title_normalized)
@@ -888,13 +888,20 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     db.commit()
 
     # 6. Détection des disparitions
+    # On ne vérifie que les items confirmés dans AU MOINS 2 snapshots distincts
+    # (last_seen_at > first_seen_at). Les items vus pour la première fois dans ce
+    # snapshot ou le précédent seront vérifiés au prochain cycle — évite les faux
+    # positifs sur les recherches larges (marque entière) où on ne peut scraper
+    # qu'une fraction du catalogue Vinted.
     disappeared_count = 0
     active_in_db = db.execute(
         text(
             """
             SELECT id, vinted_id, first_seen_at, price, seller_id, title
             FROM listings
-            WHERE search_id = :sid AND is_sold = false
+            WHERE search_id = :sid
+              AND is_sold = false
+              AND last_seen_at > first_seen_at
             """
         ),
         {"sid": search_id},
