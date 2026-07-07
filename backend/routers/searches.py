@@ -139,7 +139,7 @@ async def manual_snapshot(search_id: int, background_tasks: BackgroundTasks, db:
 
 class SearchFromUrl(BaseModel):
     vinted_url: str
-    name: Optional[str] = None
+    name: str
     price_min: int = 0
     price_max: int = 9999
     snapshot_interval_hours: int = 3
@@ -188,19 +188,9 @@ def create_search_from_url(body: SearchFromUrl, db: Session = Depends(get_db)):
         if vals:
             extra[key] = ",".join(vals)
 
-    # Générer un nom auto si non fourni
-    name = body.name
+    name = body.name.strip()
     if not name:
-        parts = []
-        if keywords:
-            parts.append(keywords)
-        if brand_ids:
-            parts.append(f"brand:{brand_ids}")
-        if catalog_ids:
-            parts.append(f"cat:{catalog_ids}")
-        if extra.get("status_ids"):
-            parts.append(f"etat:{extra['status_ids']}")
-        name = " | ".join(parts) if parts else "Recherche Vinted"
+        raise HTTPException(400, "Le nom de la recherche est obligatoire")
 
     # search_type déduit : si brand_ids → brand, si catalog_ids → category, sinon model
     if brand_ids and not catalog_ids:
