@@ -25,6 +25,7 @@ from routers.exploration import router as exploration_router
 from routers.price import router as price_router
 from routers.journal import router as journal_router
 from routers.settings_router import router as settings_router
+from routers.listings_router import router as listings_router
 
 
 @asynccontextmanager
@@ -83,6 +84,7 @@ app.add_middleware(
 
 # Routers
 app.include_router(searches_router)
+app.include_router(listings_router)
 app.include_router(models_router)
 app.include_router(exploration_router)
 app.include_router(price_router)
