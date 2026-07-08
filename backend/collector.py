@@ -19,6 +19,7 @@ from sqlalchemy import text
 from curl_cffi.requests import Session as CurlSession
 
 from logger import log_to_db
+from keywords import sanitize_keywords
 
 logger = logging.getLogger("vinted.collector")
 
@@ -557,7 +558,7 @@ def _match_model(title_normalized: str, models: list) -> Optional[int]:
                 raw = _json.loads(raw)
             except (ValueError, TypeError):
                 raw = []
-        keywords = raw or []
+        keywords = sanitize_keywords(raw or [])
         if not keywords:
             continue
         # Tous les keywords sont obligatoires pour éviter les faux positifs

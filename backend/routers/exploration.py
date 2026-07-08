@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from database.connection import get_db
 from jobs import start_exploration_job, get_job_status
+from keywords import sanitize_keywords
 
 router = APIRouter(tags=["exploration"])
 
@@ -70,6 +71,14 @@ def validate_cluster(body: ValidateClusterBody, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(409, f"Un modèle '{body.model_name}' existe déjà pour cette recherche (id={existing.id})")
 
+    clean_keywords = sanitize_keywords(body.suggested_keywords)
+    if not clean_keywords:
+        raise HTTPException(
+            400,
+            f"Mots-clés invalides pour '{body.model_name}' : tous vides ou trop courts "
+            "(minimum 2 caractères) — refusé pour éviter un modèle qui matcherait tout",
+        )
+
     try:
         row = db.execute(
             text(
@@ -82,7 +91,7 @@ def validate_cluster(body: ValidateClusterBody, db: Session = Depends(get_db)):
             ),
             {
                 "name": body.model_name,
-                "kw": json.dumps(body.suggested_keywords),
+                "kw": json.dumps(clean_keywords),
                 "sid": body.search_id,
             },
         ).fetchone()
@@ -130,7 +139,13 @@ def validate_clusters(body: ValidateClustersBody, db: Session = Depends(get_db))
             continue
 
         search_id = item.get("search_id") or body.search_id
-        suggested_keywords = item.get("suggested_keywords", [])
+        suggested_keywords = sanitize_keywords(item.get("suggested_keywords", []))
+        if not suggested_keywords:
+            errors.append({
+                "model_name": model_name,
+                "reason": "mots-clés invalides : tous vides ou trop courts (minimum 2 caractères)",
+            })
+            continue
 
         # Doublon
         existing = db.execute(

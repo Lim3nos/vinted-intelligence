@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from database.connection import get_db
 from analyzer import calculate_signal_score, calculate_heatmap
+from keywords import sanitize_keywords
 
 router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -67,6 +68,13 @@ def get_model(model_id: int, db: Session = Depends(get_db)):
 @router.post("", status_code=201)
 def create_model(body: ModelCreate, db: Session = Depends(get_db)):
     import json
+    clean_keywords = sanitize_keywords(body.keywords_rules)
+    if body.keywords_rules and not clean_keywords:
+        raise HTTPException(
+            400,
+            "keywords_rules invalides : tous les mots-clés sont vides ou trop courts "
+            "(minimum 2 caractères) — un tel modèle matcherait n'importe quelle annonce",
+        )
     row = db.execute(
         text(
             """
@@ -78,7 +86,7 @@ def create_model(body: ModelCreate, db: Session = Depends(get_db)):
         ),
         {
             "name": body.name, "brand": body.brand,
-            "kw": json.dumps(body.keywords_rules),
+            "kw": json.dumps(clean_keywords),
             "sid": body.search_id, "prio": body.user_priority,
             "notes": body.user_notes,
         },
@@ -93,14 +101,21 @@ def update_model(model_id: int, body: ModelUpdate, db: Session = Depends(get_db)
     updates = body.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(400, "Aucun champ à mettre à jour")
+    clean_keywords = None
     if "keywords_rules" in updates:
-        updates["keywords_rules"] = f"CAST('{json.dumps(updates['keywords_rules'])}' AS jsonb)"
+        clean_keywords = sanitize_keywords(body.keywords_rules)
+        if body.keywords_rules and not clean_keywords:
+            raise HTTPException(
+                400,
+                "keywords_rules invalides : tous les mots-clés sont vides ou trop courts "
+                "(minimum 2 caractères) — un tel modèle matcherait n'importe quelle annonce",
+            )
     sets = []
     params: dict = {"mid": model_id, "now": "NOW()"}
     for k, v in updates.items():
         if k == "keywords_rules":
             sets.append(f"{k} = CAST(:{k}_raw AS jsonb)")
-            params[f"{k}_raw"] = json.dumps(body.keywords_rules)
+            params[f"{k}_raw"] = json.dumps(clean_keywords)
         else:
             sets.append(f"{k} = :{k}")
             params[k] = v

@@ -18,6 +18,7 @@ from sqlalchemy import text
 from database.connection import get_db, test_connection
 from logger import log_to_db
 from ai_clustering import is_circuit_open
+from keywords import sanitize_keywords
 
 from routers.searches import router as searches_router
 from routers.models_router import router as models_router
@@ -54,6 +55,49 @@ async def lifespan(app: FastAPI):
             _db_mig.commit()
         except Exception:
             _db_mig.rollback()
+
+    # Nettoyage rétroactif de keywords_rules — cause racine du bug des "modèles
+    # parasités" : un mot-clé vide ou trop court matche n'importe quel titre
+    # (substring vide toujours présente en Python), ce qui fait que le matching
+    # assigne alors la totalité du bruit d'une recherche au modèle concerné.
+    # Idempotent : ne réécrit que les lignes réellement modifiées par le nettoyage.
+    try:
+        import json as _json
+        model_rows = _db_mig.execute(
+            text("SELECT id, name, keywords_rules FROM product_models")
+        ).fetchall()
+        fixed_count = 0
+        emptied_ids = []
+        for m in model_rows:
+            raw = m.keywords_rules
+            if isinstance(raw, str):
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    raw = []
+            original = raw or []
+            cleaned = sanitize_keywords(original)
+            if cleaned != original:
+                _db_mig.execute(
+                    text("UPDATE product_models SET keywords_rules = CAST(:kw AS jsonb) WHERE id = :mid"),
+                    {"kw": _json.dumps(cleaned), "mid": m.id},
+                )
+                fixed_count += 1
+                if not cleaned:
+                    emptied_ids.append(m.id)
+        _db_mig.commit()
+        if fixed_count:
+            log_to_db(
+                "WARNING", "api",
+                f"Migration keywords_rules : {fixed_count} modele(s) nettoye(s) — "
+                f"{len(emptied_ids)} n'ont plus aucun mot-cle valide "
+                "(matching desactive jusqu'a correction manuelle)",
+                {"emptied_model_ids": emptied_ids},
+            )
+    except Exception as e:
+        _db_mig.rollback()
+        log_to_db("ERROR", "api", f"Migration keywords_rules echouee : {e}")
+
     _db_mig.close()
 
     from scheduler import setup_scheduler
@@ -346,7 +390,7 @@ def rematch_listings(db: Session = Depends(get_db)):
                     raw = _json.loads(raw)
                 except Exception:
                     raw = []
-            keywords = raw or []
+            keywords = sanitize_keywords(raw or [])
             if not keywords:
                 continue
             mandatory = keywords
