@@ -19,7 +19,7 @@ from sqlalchemy import text
 from curl_cffi.requests import Session as CurlSession
 
 from logger import log_to_db
-from keywords import sanitize_keywords
+from keywords import match_model
 
 logger = logging.getLogger("vinted.collector")
 
@@ -539,38 +539,17 @@ def _check_seller_still_has_item(vinted_id: int, seller_id: Optional[int], title
         return None
 
 
-def _match_model(title_normalized: str, models: list) -> Optional[int]:
+def csv_to_list(csv_value: Optional[str]) -> list:
     """
-    Retourne l'id du product_model dont tous les keywords_rules sont présents
-    dans le titre normalisé. En cas de plusieurs matchs, choisit le plus spécifique
-    (celui avec le plus de keywords). Retourne None si aucun match.
+    Convertit une chaîne d'IDs séparés par des virgules (ex: "123,456") en liste.
+
+    Nécessaire pour envoyer les params array Vinted (brand_ids[], catalog_ids[], etc.)
+    correctement : un simple `brand_ids=123` est silencieusement ignoré par l'API
+    Vinted, qui attend le format tableau `brand_ids[]=123`.
     """
-    import json as _json
-
-    best_id: Optional[int] = None
-    best_count = 0
-
-    for m in models:
-        raw = m.keywords_rules
-        # psycopg2 sur certains envs retourne JSONB en string — parser explicitement
-        if isinstance(raw, str):
-            try:
-                raw = _json.loads(raw)
-            except (ValueError, TypeError):
-                raw = []
-        keywords = sanitize_keywords(raw or [])
-        if not keywords:
-            continue
-        # Tous les keywords sont obligatoires pour éviter les faux positifs
-        mandatory = keywords
-        if not all(kw.lower() in title_normalized for kw in mandatory):
-            continue
-        matches = sum(1 for kw in keywords if kw.lower() in title_normalized)
-        if matches > best_count:
-            best_count = matches
-            best_id = m.id
-
-    return best_id
+    if not csv_value:
+        return []
+    return [v.strip() for v in csv_value.split(",") if v.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -615,33 +594,42 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     # 1b. Charger les product_models actifs de cette recherche pour le matching
     active_models = db.execute(
         text(
-            "SELECT id, keywords_rules FROM product_models "
+            "SELECT id, keywords_rules, search_variants FROM product_models "
             "WHERE search_id = :sid AND is_active = true"
         ),
         {"sid": search_id},
     ).fetchall()
 
     # 2. Construire les paramètres de scraping
+    # IMPORTANT : les filtres Vinted à valeurs multiples (brand_ids, catalog_ids,
+    # status_ids, size_ids, color_ids...) doivent être envoyés au format tableau
+    # `cle[]=valeur` — un simple `cle=valeur` est silencieusement ignoré par l'API
+    # Vinted (confirmé : un brand_ids=X sans crochets ne filtre pas du tout par marque).
     scraper_params = {}
     if search.keywords:
         scraper_params["search_text"] = search.keywords
     if search.brand_ids:
-        scraper_params["brand_ids"] = search.brand_ids
+        scraper_params["brand_ids[]"] = csv_to_list(search.brand_ids)
     if search.catalog_ids:
-        scraper_params["catalog_ids"] = search.catalog_ids
+        scraper_params["catalog_ids[]"] = csv_to_list(search.catalog_ids)
     if search.price_min is not None:
         scraper_params["price_from"] = search.price_min
     if search.price_max is not None:
         scraper_params["price_to"] = search.price_max
 
     # Paramètres extra issus d'une URL Vinted (status_ids, size_ids, color_ids, etc.)
+    # — mêmes filtres array, même format [] requis.
     try:
         import json as _json
         extra = search.extra_params
         if isinstance(extra, str):
             extra = _json.loads(extra)
         if isinstance(extra, dict):
-            scraper_params.update(extra)
+            for extra_key, extra_val in extra.items():
+                if isinstance(extra_val, str) and extra_val:
+                    scraper_params[f"{extra_key}[]"] = csv_to_list(extra_val)
+                elif extra_val:
+                    scraper_params[extra_key] = extra_val
     except Exception:
         pass
 
@@ -717,7 +705,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             ).fetchone()
 
             # Matching vers un product_model
-            matched_model_id = _match_model(title_norm, active_models)
+            matched_model_id = match_model(title_norm, active_models)
 
             if not existing:
                 # Déduplication avant insertion

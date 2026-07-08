@@ -18,7 +18,7 @@ from sqlalchemy import text
 from database.connection import get_db, test_connection
 from logger import log_to_db
 from ai_clustering import is_circuit_open
-from keywords import sanitize_keywords
+from keywords import sanitize_keywords, match_model
 
 from routers.searches import router as searches_router
 from routers.models_router import router as models_router
@@ -346,12 +346,14 @@ def rematch_listings(db: Session = Depends(get_db)):
     Rattache rétroactivement les listings sans product_model_id aux modèles actifs
     en appliquant les keywords_rules. À appeler après avoir validé de nouveaux clusters.
     """
-    import json as _json
     from collections import defaultdict
 
     # Charger les modèles actifs
     model_rows = db.execute(
-        text("SELECT id, search_id, keywords_rules FROM product_models WHERE is_active = true")
+        text(
+            "SELECT id, search_id, keywords_rules, search_variants "
+            "FROM product_models WHERE is_active = true"
+        )
     ).fetchall()
 
     models_by_search: dict = defaultdict(list)
@@ -381,25 +383,7 @@ def rematch_listings(db: Session = Depends(get_db)):
             continue
 
         title = listing.title_normalized or ""
-        best_id = None
-        best_count = 0
-        for m in candidates:
-            raw = m.keywords_rules
-            if isinstance(raw, str):
-                try:
-                    raw = _json.loads(raw)
-                except Exception:
-                    raw = []
-            keywords = sanitize_keywords(raw or [])
-            if not keywords:
-                continue
-            mandatory = keywords
-            if not all(kw.lower() in title for kw in mandatory):
-                continue
-            matches = sum(1 for kw in keywords if kw.lower() in title)
-            if matches > best_count:
-                best_count = matches
-                best_id = m.id
+        best_id = match_model(title, candidates)
 
         if best_id:
             db.execute(

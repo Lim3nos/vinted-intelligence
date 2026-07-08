@@ -129,10 +129,9 @@ def setup_scheduler(db_session_factory):
     # -----------------------------------------------------------------------
     def job_variant_snapshots():
         import asyncio
-        from collector import safe_request_paginated, normalize_title, _extract_price, _extract_seller
-        from keywords import sanitize_keywords
+        from collector import safe_request_paginated, normalize_title, _extract_price, _extract_seller, csv_to_list
+        from keywords import build_keyword_sets
         from datetime import datetime, timezone
-        import json as _json
 
         db = db_session_factory()
         try:
@@ -140,7 +139,7 @@ def setup_scheduler(db_session_factory):
                 text(
                     """
                     SELECT pm.id AS model_id, pm.name, pm.search_variants, pm.keywords_rules,
-                           s.price_min, s.price_max, s.id AS search_id
+                           s.price_min, s.price_max, s.brand_ids, s.id AS search_id
                     FROM product_models pm
                     JOIN searches s ON s.id = pm.search_id
                     WHERE pm.is_active = true
@@ -158,19 +157,17 @@ def setup_scheduler(db_session_factory):
             total_rejected = 0
 
             for model in models:
-                # Mots-clés obligatoires du modèle — un résultat de recherche Vinted
-                # (fuzzy/pertinence, pas un ET strict) n'est accepté QUE s'il les contient
-                # tous. Sans cette vérification, la recherche par variante attache
-                # n'importe quel résultat approximatif au modèle (cause des "parasites").
-                raw_kw = model.keywords_rules
-                if isinstance(raw_kw, str):
-                    try:
-                        raw_kw = _json.loads(raw_kw)
-                    except Exception:
-                        raw_kw = []
-                mandatory_kw = sanitize_keywords(raw_kw or [])
-                if not mandatory_kw:
+                # Jeux de mots-clés acceptés (base OU une variante) — un résultat de
+                # recherche Vinted (fuzzy/pertinence, pas un ET strict) n'est accepté
+                # que s'il satisfait entièrement au moins un jeu. Vérifier uniquement
+                # les keywords_rules de base rejetterait les résultats trouvés PAR une
+                # variante qui n'utilise pas les mêmes mots (contradictoire avec le but
+                # même de la recherche par variantes).
+                keyword_sets = build_keyword_sets(model.keywords_rules, model.search_variants)
+                if not keyword_sets:
                     continue
+
+                brand_ids_list = csv_to_list(model.brand_ids)
 
                 variants = model.search_variants or []
                 for variant in variants:
@@ -181,6 +178,8 @@ def setup_scheduler(db_session_factory):
                         params["price_from"] = model.price_min
                     if model.price_max:
                         params["price_to"] = model.price_max
+                    if brand_ids_list:
+                        params["brand_ids[]"] = brand_ids_list
 
                     items = safe_request_paginated(params, max_pages=2)
                     if not items:
@@ -195,9 +194,11 @@ def setup_scheduler(db_session_factory):
                             title = item.get("title") or ""
                             title_norm = normalize_title(title)
 
-                            # Rejeter tout résultat dont le titre ne contient pas
-                            # tous les mots-clés obligatoires du modèle
-                            if not all(kw in title_norm for kw in mandatory_kw):
+                            # Rejeter tout résultat qui ne satisfait entièrement aucun
+                            # des jeux de mots-clés acceptés pour ce modèle
+                            if not any(
+                                all(kw in title_norm for kw in kw_set) for kw_set in keyword_sets
+                            ):
                                 total_rejected += 1
                                 continue
 
