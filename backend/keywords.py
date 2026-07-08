@@ -90,16 +90,51 @@ def build_keyword_sets(keywords_rules, search_variants) -> list:
     return sets
 
 
-def match_model(title_normalized: str, models: list) -> Optional[int]:
+def keyword_set_matches(title_normalized: str, kw_set: list, brand_hint: Optional[str] = None) -> bool:
+    """
+    Vérifie si un jeu de mots-clés matche un titre.
+
+    Si `brand_hint` (nom de la marque recherchée, lowercase) est fourni ET
+    présent dans ce jeu : la marque doit être dans le titre, ET AU MOINS UN
+    des autres mots du jeu doit y être aussi — assoupli par rapport à un ET
+    strict sur tous les mots, pour ne pas rater un vrai match à cause d'un
+    seul mot descriptif absent (ex. "whistle necklace" au lieu de "whistle
+    pendant" — même produit, formulation différente). La marque reste
+    obligatoire, donc aucun risque de faux positif inter-marques.
+
+    Sans `brand_hint` (ou absent de ce jeu) : comportement strict d'origine,
+    tous les mots doivent être présents — fallback sûr quand on ne connaît
+    pas la marque de la recherche parente.
+    """
+    if not kw_set:
+        return False
+
+    if brand_hint and brand_hint in kw_set:
+        if brand_hint not in title_normalized:
+            return False
+        others = [kw for kw in kw_set if kw != brand_hint]
+        return not others or any(kw in title_normalized for kw in others)
+
+    return all(kw in title_normalized for kw in kw_set)
+
+
+def match_model(title_normalized: str, models: list, brand_hint: Optional[str] = None) -> Optional[int]:
     """
     Retourne l'id du product_model dont au moins un jeu de mots-clés (base ou
-    variante, voir build_keyword_sets) est entièrement présent dans le titre
-    normalisé. En cas de plusieurs matchs, choisit le jeu le plus spécifique
-    (le plus grand nombre de mots-clés). Retourne None si aucun match.
+    variante, voir build_keyword_sets) matche le titre normalisé (voir
+    keyword_set_matches). En cas de plusieurs matchs, choisit le jeu le plus
+    spécifique (le plus grand nombre de mots-clés). Retourne None si aucun
+    match.
 
     `models` : itérable d'objets avec attributs `.id`, `.keywords_rules`,
     et `.search_variants` (ce dernier peut être absent/None).
+    `brand_hint` : nom de la marque de la recherche parente si connue
+    (ex. "lemaire" pour une recherche search_type='brand') — voir
+    keyword_set_matches pour l'effet exact.
     """
+    if brand_hint:
+        brand_hint = brand_hint.strip().lower()
+
     best_id: Optional[int] = None
     best_count = 0
 
@@ -109,7 +144,7 @@ def match_model(title_normalized: str, models: list) -> Optional[int]:
             getattr(m, "search_variants", None),
         )
         for kw_set in keyword_sets:
-            if kw_set and all(kw in title_normalized for kw in kw_set) and len(kw_set) > best_count:
+            if keyword_set_matches(title_normalized, kw_set, brand_hint) and len(kw_set) > best_count:
                 best_count = len(kw_set)
                 best_id = m.id
 

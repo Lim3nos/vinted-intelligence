@@ -362,6 +362,17 @@ def rematch_listings(db: Session = Depends(get_db)):
 
     distinct_search_ids = list(models_by_search.keys())
 
+    # Nom de marque par recherche (search_type='brand') — assouplit le matching
+    # des variantes (voir keywords.py::keyword_set_matches)
+    search_rows = db.execute(
+        text("SELECT id, name, search_type FROM searches WHERE id = ANY(:sids)"),
+        {"sids": distinct_search_ids},
+    ).fetchall()
+    brand_hint_by_search = {
+        s.id: (s.name.strip().lower() if s.search_type == "brand" and s.name else None)
+        for s in search_rows
+    }
+
     # Listings sans model_id pour les search_id qui ont des modèles
     listings = db.execute(
         text(
@@ -383,7 +394,7 @@ def rematch_listings(db: Session = Depends(get_db)):
             continue
 
         title = listing.title_normalized or ""
-        best_id = match_model(title, candidates)
+        best_id = match_model(title, candidates, brand_hint=brand_hint_by_search.get(listing.search_id))
 
         if best_id:
             db.execute(

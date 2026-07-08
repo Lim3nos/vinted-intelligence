@@ -600,6 +600,10 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         {"sid": search_id},
     ).fetchall()
 
+    # Nom de la marque si cette recherche est de type 'brand' — permet au
+    # matching d'assouplir le ET strict sur les variantes (voir keywords.py)
+    brand_hint = search.name.strip().lower() if search.search_type == "brand" and search.name else None
+
     # 2. Construire les paramètres de scraping
     # IMPORTANT : les filtres Vinted à valeurs multiples (brand_ids, catalog_ids,
     # status_ids, size_ids, color_ids...) doivent être envoyés au format tableau
@@ -633,7 +637,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     except Exception:
         pass
 
-    items = safe_request_paginated(scraper_params, max_pages=5)
+    # max_pages=15 (1440 annonces max) : une recherche par marque seule (brand_ids,
+    # sans search_text) est un catalogue propre côté Vinted — pas de risque de bruit
+    # en allant plus profond, seulement un risque de RATER des annonces plus anciennes
+    # si on s'arrête trop tôt (confirmé : jusqu'à 960 annonces existantes pour une
+    # marque, largement au-delà des 480 couvertes par les 5 pages précédentes).
+    items = safe_request_paginated(scraper_params, max_pages=15)
 
     # 3. Erreur réseau → abandonner sans toucher aux données existantes
     if items is None:
@@ -705,7 +714,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             ).fetchone()
 
             # Matching vers un product_model
-            matched_model_id = match_model(title_norm, active_models)
+            matched_model_id = match_model(title_norm, active_models, brand_hint=brand_hint)
 
             if not existing:
                 # Déduplication avant insertion

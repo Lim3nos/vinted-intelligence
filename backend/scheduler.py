@@ -130,7 +130,7 @@ def setup_scheduler(db_session_factory):
     def job_variant_snapshots():
         import asyncio
         from collector import safe_request_paginated, normalize_title, _extract_price, _extract_seller, csv_to_list
-        from keywords import build_keyword_sets
+        from keywords import build_keyword_sets, keyword_set_matches
         from datetime import datetime, timezone
 
         db = db_session_factory()
@@ -139,7 +139,8 @@ def setup_scheduler(db_session_factory):
                 text(
                     """
                     SELECT pm.id AS model_id, pm.name, pm.search_variants, pm.keywords_rules,
-                           s.price_min, s.price_max, s.brand_ids, s.id AS search_id
+                           s.price_min, s.price_max, s.brand_ids, s.id AS search_id,
+                           s.name AS search_name, s.search_type
                     FROM product_models pm
                     JOIN searches s ON s.id = pm.search_id
                     WHERE pm.is_active = true
@@ -167,6 +168,11 @@ def setup_scheduler(db_session_factory):
                 if not keyword_sets:
                     continue
 
+                brand_hint = (
+                    model.search_name.strip().lower()
+                    if model.search_type == "brand" and model.search_name
+                    else None
+                )
                 brand_ids_list = csv_to_list(model.brand_ids)
 
                 variants = model.search_variants or []
@@ -194,10 +200,11 @@ def setup_scheduler(db_session_factory):
                             title = item.get("title") or ""
                             title_norm = normalize_title(title)
 
-                            # Rejeter tout résultat qui ne satisfait entièrement aucun
-                            # des jeux de mots-clés acceptés pour ce modèle
+                            # Rejeter tout résultat qui ne satisfait aucun des jeux de
+                            # mots-clés acceptés pour ce modèle (voir keyword_set_matches)
                             if not any(
-                                all(kw in title_norm for kw in kw_set) for kw_set in keyword_sets
+                                keyword_set_matches(title_norm, kw_set, brand_hint)
+                                for kw_set in keyword_sets
                             ):
                                 total_rejected += 1
                                 continue
