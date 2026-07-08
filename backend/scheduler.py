@@ -130,14 +130,16 @@ def setup_scheduler(db_session_factory):
     def job_variant_snapshots():
         import asyncio
         from collector import safe_request_paginated, normalize_title, _extract_price, _extract_seller
+        from keywords import sanitize_keywords
         from datetime import datetime, timezone
+        import json as _json
 
         db = db_session_factory()
         try:
             models = db.execute(
                 text(
                     """
-                    SELECT pm.id AS model_id, pm.name, pm.search_variants,
+                    SELECT pm.id AS model_id, pm.name, pm.search_variants, pm.keywords_rules,
                            s.price_min, s.price_max, s.id AS search_id
                     FROM product_models pm
                     JOIN searches s ON s.id = pm.search_id
@@ -153,8 +155,23 @@ def setup_scheduler(db_session_factory):
 
             now_utc = datetime.now(timezone.utc)
             total_new = 0
+            total_rejected = 0
 
             for model in models:
+                # Mots-clés obligatoires du modèle — un résultat de recherche Vinted
+                # (fuzzy/pertinence, pas un ET strict) n'est accepté QUE s'il les contient
+                # tous. Sans cette vérification, la recherche par variante attache
+                # n'importe quel résultat approximatif au modèle (cause des "parasites").
+                raw_kw = model.keywords_rules
+                if isinstance(raw_kw, str):
+                    try:
+                        raw_kw = _json.loads(raw_kw)
+                    except Exception:
+                        raw_kw = []
+                mandatory_kw = sanitize_keywords(raw_kw or [])
+                if not mandatory_kw:
+                    continue
+
                 variants = model.search_variants or []
                 for variant in variants:
                     if not variant:
@@ -174,6 +191,16 @@ def setup_scheduler(db_session_factory):
                             vinted_id = int(item.get("id", 0))
                             if not vinted_id:
                                 continue
+
+                            title = item.get("title") or ""
+                            title_norm = normalize_title(title)
+
+                            # Rejeter tout résultat dont le titre ne contient pas
+                            # tous les mots-clés obligatoires du modèle
+                            if not all(kw in title_norm for kw in mandatory_kw):
+                                total_rejected += 1
+                                continue
+
                             existing = db.execute(
                                 text("SELECT id, product_model_id FROM listings WHERE vinted_id=:vid"),
                                 {"vid": vinted_id},
@@ -187,9 +214,8 @@ def setup_scheduler(db_session_factory):
                                         {"mid": model.model_id, "lid": existing.id},
                                     )
                             else:
-                                # Insérer avec product_model_id direct (trouvé via variante)
-                                title = item.get("title") or ""
-                                title_norm = normalize_title(title)
+                                # Insérer avec product_model_id direct (trouvé via variante,
+                                # titre vérifié ci-dessus)
                                 price = _extract_price(item.get("price"))
                                 seller_info = _extract_seller(item)
                                 url = item.get("url") or ""
@@ -225,11 +251,12 @@ def setup_scheduler(db_session_factory):
 
                 db.commit()
 
-            if total_new > 0:
+            if total_new > 0 or total_rejected > 0:
                 log_to_db(
                     "INFO", "scheduler",
-                    f"Snapshot variantes — {total_new} nouvelles annonces insérées",
-                    {"new": total_new},
+                    f"Snapshot variantes — {total_new} nouvelles annonces insérées, "
+                    f"{total_rejected} résultats rejetés (titre ne matchait pas les keywords_rules)",
+                    {"new": total_new, "rejected": total_rejected},
                 )
 
         except Exception as e:
