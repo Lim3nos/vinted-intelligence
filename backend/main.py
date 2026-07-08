@@ -405,6 +405,70 @@ def rematch_listings(db: Session = Depends(get_db)):
     return result
 
 
+@app.post("/api/admin/cleanup-polluted-listings")
+def cleanup_polluted_listings(dry_run: bool = Query(True), db: Session = Depends(get_db)):
+    """
+    Supprime les listings clairement hors-sujet insérés par l'ancien bug de
+    job_variant_snapshots (recherche Vinted sans vérification titre/marque,
+    colonne brand jamais renseignée à l'insertion).
+
+    Critères de suppression (tous requis, volontairement conservateurs) :
+      - recherche de type 'brand' (nom de marque connu, ex. "Lemaire")
+      - product_model_id IS NULL (jamais rattaché à un modèle suivi)
+      - ni le champ brand ni le titre ne mentionnent la marque de la recherche
+
+    Un listing qui a `brand` correspondant OU qui mentionne la marque dans son
+    titre est TOUJOURS conservé, même sans modèle rattaché — il peut s'agir
+    d'une vraie annonce de la marque pas encore clusterisée en modèle précis.
+
+    dry_run=true (défaut) : ne fait que compter, ne supprime rien.
+    dry_run=false : supprime réellement (price_history/favourites_snapshots
+    liés sont nettoyés en cascade via les FK ON DELETE CASCADE).
+    """
+    searches = db.execute(
+        text("SELECT id, name FROM searches WHERE search_type = 'brand'")
+    ).fetchall()
+
+    total = 0
+    details = []
+
+    for s in searches:
+        brand_token = (s.name or "").strip().lower()
+        if not brand_token:
+            continue
+
+        params = {"sid": s.id, "brand_token": brand_token, "pattern": f"%{brand_token}%"}
+        where_clause = """
+            search_id = :sid
+            AND product_model_id IS NULL
+            AND (brand IS NULL OR LOWER(brand) != :brand_token)
+            AND (title_normalized IS NULL OR title_normalized NOT ILIKE :pattern)
+        """
+
+        if dry_run:
+            count = db.execute(
+                text(f"SELECT COUNT(*) FROM listings WHERE {where_clause}"), params
+            ).scalar()
+            if count:
+                details.append({"search_id": s.id, "search_name": s.name, "would_delete": count})
+                total += count
+        else:
+            result = db.execute(text(f"DELETE FROM listings WHERE {where_clause}"), params)
+            db.commit()
+            if result.rowcount:
+                details.append({"search_id": s.id, "search_name": s.name, "deleted": result.rowcount})
+                total += result.rowcount
+
+    if not dry_run and total:
+        log_to_db(
+            "WARNING", "api",
+            f"Nettoyage listings pollués : {total} lignes supprimées",
+            {"details": details},
+        )
+
+    return {"dry_run": dry_run, "total": total, "details": details}
+
+
 @app.get("/api/debug/scrape")
 def debug_scrape(q: str = "lemaire", db: Session = Depends(get_db)):
     """
