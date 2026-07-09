@@ -14,6 +14,30 @@ from typing import Optional
 
 MIN_KEYWORD_LENGTH = 2
 
+# Mots trop génériques pour, seuls, distinguer un modèle d'un autre de la même
+# marque (couleurs, tailles, état, genre...). Un sac et un pendentif peuvent
+# tous les deux être "noir" — ce mot ne doit jamais suffire, avec la marque,
+# à confirmer qu'une annonce est LE modèle recherché plutôt qu'un autre.
+GENERIC_WORDS = {
+    # couleurs (fr/en/it/es/de)
+    "noir", "noire", "black", "nero", "negro", "schwarz",
+    "blanc", "blanche", "white", "bianco", "blanco", "weiss",
+    "gris", "grise", "grey", "gray", "grigio",
+    "rouge", "red", "rosso", "rojo", "rot",
+    "bleu", "bleue", "blue", "blu", "azul", "blau",
+    "vert", "verte", "green", "verde", "grun",
+    "jaune", "yellow", "giallo", "amarillo", "gelb",
+    "rose", "pink", "rosa",
+    "marron", "brown", "marrone", "braun",
+    "beige", "violet", "purple", "viola", "orange",
+    "dore", "doree", "gold", "golden", "oro",
+    "argente", "argentee", "silver", "argento",
+    # tailles / état / genre — génériques, jamais distinctifs d'un modèle
+    "taille", "size", "xs", "xxl",
+    "neuf", "new", "nuovo", "occasion", "vintage", "used",
+    "femme", "homme", "women", "men", "woman", "man",
+}
+
 
 def sanitize_keywords(keywords: list) -> list:
     """
@@ -96,11 +120,17 @@ def keyword_set_matches(title_normalized: str, kw_set: list, brand_hint: Optiona
 
     Si `brand_hint` (nom de la marque recherchée, lowercase) est fourni ET
     présent dans ce jeu : la marque doit être dans le titre, ET AU MOINS UN
-    des autres mots du jeu doit y être aussi — assoupli par rapport à un ET
-    strict sur tous les mots, pour ne pas rater un vrai match à cause d'un
+    des autres mots DISTINCTIFS du jeu doit y être aussi (les mots génériques
+    — couleurs, tailles, état, voir GENERIC_WORDS — ne comptent pas : un sac
+    et un pendentif peuvent tous les deux être "noir", donc "marque + noir"
+    ne doit jamais suffire à confirmer le modèle). Assoupli par rapport à un
+    ET strict sur tous les mots, pour ne pas rater un vrai match à cause d'un
     seul mot descriptif absent (ex. "whistle necklace" au lieu de "whistle
-    pendant" — même produit, formulation différente). La marque reste
-    obligatoire, donc aucun risque de faux positif inter-marques.
+    pendant" — même produit, formulation différente).
+
+    Si aucun mot distinctif ne reste après avoir retiré la marque et les mots
+    génériques, ce jeu ne peut jamais matcher via ce chemin assoupli (pas de
+    fallback permissif sur la marque seule).
 
     Sans `brand_hint` (ou absent de ce jeu) : comportement strict d'origine,
     tous les mots doivent être présents — fallback sûr quand on ne connaît
@@ -112,8 +142,8 @@ def keyword_set_matches(title_normalized: str, kw_set: list, brand_hint: Optiona
     if brand_hint and brand_hint in kw_set:
         if brand_hint not in title_normalized:
             return False
-        others = [kw for kw in kw_set if kw != brand_hint]
-        return not others or any(kw in title_normalized for kw in others)
+        distinctive = [kw for kw in kw_set if kw != brand_hint and kw not in GENERIC_WORDS]
+        return bool(distinctive) and any(kw in title_normalized for kw in distinctive)
 
     return all(kw in title_normalized for kw in kw_set)
 
