@@ -600,10 +600,6 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         {"sid": search_id},
     ).fetchall()
 
-    # Nom de la marque si cette recherche est de type 'brand' — permet au
-    # matching d'assouplir le ET strict sur les variantes (voir keywords.py)
-    brand_hint = search.name.strip().lower() if search.search_type == "brand" and search.name else None
-
     # 2. Construire les paramètres de scraping
     # IMPORTANT : les filtres Vinted à valeurs multiples (brand_ids, catalog_ids,
     # status_ids, size_ids, color_ids...) doivent être envoyés au format tableau
@@ -714,7 +710,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             ).fetchone()
 
             # Matching vers un product_model
-            matched_model_id = match_model(title_norm, active_models, brand_hint=brand_hint)
+            matched_model_id = match_model(title_norm, active_models)
 
             if not existing:
                 # Déduplication avant insertion

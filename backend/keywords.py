@@ -14,36 +14,57 @@ from typing import Optional
 
 MIN_KEYWORD_LENGTH = 2
 
-# Mots trop génériques pour, seuls, distinguer un modèle d'un autre de la même
-# marque (couleurs, tailles, état, genre...). Un sac et un pendentif peuvent
-# tous les deux être "noir" — ce mot ne doit jamais suffire, avec la marque,
-# à confirmer qu'une annonce est LE modèle recherché plutôt qu'un autre.
-GENERIC_WORDS = {
-    # couleurs (fr/en/it/es/de)
-    "noir", "noire", "black", "nero", "negro", "schwarz",
-    "blanc", "blanche", "white", "bianco", "blanco", "weiss",
-    "gris", "grise", "grey", "gray", "grigio",
-    "rouge", "red", "rosso", "rojo", "rot",
-    "bleu", "bleue", "blue", "blu", "azul", "blau",
-    "vert", "verte", "green", "verde", "grun",
-    "jaune", "yellow", "giallo", "amarillo", "gelb",
-    "rose", "pink", "rosa",
-    "marron", "brown", "marrone", "braun",
-    "beige", "violet", "purple", "viola", "orange",
-    "dore", "doree", "gold", "golden", "oro",
-    "argente", "argentee", "silver", "argento",
-    # tailles / état / genre — génériques, jamais distinctifs d'un modèle
-    "taille", "size", "xs", "xxl",
-    "neuf", "new", "nuovo", "occasion", "vintage", "used",
-    "femme", "homme", "women", "men", "woman", "man",
-}
+# Groupes de synonymes/traductions (fr/en/it/de) : des mots qui désignent LA
+# MÊME CHOSE dans des langues ou formulations différentes (ex: pendentif =
+# pendant = necklace = collier, observé directement dans les variantes
+# générées par Gemini pour un même produit). Chaque mot d'un groupe est
+# canonicalisé vers le premier terme du groupe avant tout matching.
+#
+# Contrairement à un assouplissement du ET (accepter un match partiel), ceci
+# ne relâche JAMAIS la précision : un titre doit toujours satisfaire TOUS les
+# mots du jeu de mots-clés, juste sous n'importe laquelle de leurs variantes
+# linguistiques. Ça évite de rater "whistle necklace" quand le jeu attend
+# "whistle pendant", sans jamais risquer qu'un mot générique isolé (une
+# couleur, une matière, une catégorie de produit) suffise à lui seul à
+# confirmer un modèle — un sac et un pendentif peuvent tous les deux être
+# "noir" ou en "laine", ça ne les rend pas interchangeables.
+SYNONYM_GROUPS = [
+    {"pendentif", "pendant", "necklace", "collier", "ciondolo", "collana"},
+    {"wool", "laine", "lana", "wolle"},
+    {"trousers", "pantalon", "pants", "pantaloni", "hose"},
+    {"bag", "sac", "borsa"},
+    {"shoes", "chaussures", "chaussure", "scarpe"},
+    {"jacket", "veste", "giacca"},
+    {"dress", "robe", "vestito"},
+    {"shirt", "chemise", "camicia"},
+    {"skirt", "jupe", "gonna"},
+    {"coat", "manteau", "cappotto"},
+    {"belt", "ceinture", "cintura"},
+    {"scarf", "echarpe", "sciarpa"},
+    {"gloves", "gants", "guanti"},
+    {"wallet", "portefeuille", "portafoglio"},
+    {"leather", "cuir", "pelle", "leder"},
+    {"silk", "soie", "seta"},
+    {"cotton", "coton", "cotone"},
+]
+
+_CANONICAL_MAP: dict = {}
+for _group in SYNONYM_GROUPS:
+    _canon = sorted(_group)[0]
+    for _word in _group:
+        _CANONICAL_MAP[_word] = _canon
+
+
+def _canonicalize(word: str) -> str:
+    """Remplace un mot par sa forme canonique s'il appartient à un groupe de synonymes."""
+    return _CANONICAL_MAP.get(word, word)
 
 
 def sanitize_keywords(keywords: list) -> list:
     """
-    Nettoie une liste de mots-clés de matching : strip, lowercase, dédoublonne,
-    rejette les entrées vides, non-textuelles, ou trop courtes
-    (< MIN_KEYWORD_LENGTH caractères après strip).
+    Nettoie une liste de mots-clés de matching : strip, lowercase, canonicalise
+    les synonymes (voir SYNONYM_GROUPS), dédoublonne, rejette les entrées
+    vides, non-textuelles, ou trop courtes (< MIN_KEYWORD_LENGTH caractères).
 
     Retourne une nouvelle liste propre. Ne modifie jamais la liste d'origine.
     """
@@ -52,7 +73,7 @@ def sanitize_keywords(keywords: list) -> list:
     for kw in keywords or []:
         if not isinstance(kw, str):
             continue
-        kw_clean = kw.strip().lower()
+        kw_clean = _canonicalize(kw.strip().lower())
         if len(kw_clean) < MIN_KEYWORD_LENGTH:
             continue
         if kw_clean in seen:
@@ -73,7 +94,8 @@ def _parse_json_list(raw) -> list:
 
 
 def _words_from_phrase(phrase: str) -> list:
-    """Découpe une phrase de variante de recherche en mots normalisés (>= MIN_KEYWORD_LENGTH)."""
+    """Découpe une phrase (variante de recherche ou titre) en mots normalisés
+    et canonicalisés (>= MIN_KEYWORD_LENGTH)."""
     if not isinstance(phrase, str):
         return []
     words = re.findall(r"[^\W_]+", phrase.lower(), flags=re.UNICODE)
@@ -86,12 +108,13 @@ def build_keyword_sets(keywords_rules, search_variants) -> list:
     de base (keywords_rules) et un jeu dérivé de chaque variante de recherche
     générée par Gemini (search_variants).
 
-    Un titre matche le modèle s'il satisfait AU MOINS UN de ces jeux (OR de
+    Un titre matche le modèle s'il satisfait ENTIÈREMENT (tous les mots,
+    après canonicalisation des synonymes) AU MOINS UN de ces jeux (OR de
     groupes ET) — permet de capter les variantes de nom d'un même produit
-    (traduction, orthographe, formulation différente) sans élargir le
-    matching à n'importe quel résultat approchant.
+    (traduction, orthographe, formulation différente) sans jamais relâcher
+    la précision : chaque jeu reste un ET strict sur tous ses mots.
 
-    Retourne une liste de listes de mots-clés, dédoublonnée.
+    Retourne une liste de listes de mots-clés (déjà canonicalisés), dédoublonnée.
     """
     sets = []
     seen = set()
@@ -114,57 +137,30 @@ def build_keyword_sets(keywords_rules, search_variants) -> list:
     return sets
 
 
-def keyword_set_matches(title_normalized: str, kw_set: list, brand_hint: Optional[str] = None) -> bool:
+def keyword_set_matches(title_normalized: str, kw_set: list) -> bool:
     """
-    Vérifie si un jeu de mots-clés matche un titre.
-
-    Si `brand_hint` (nom de la marque recherchée, lowercase) est fourni ET
-    présent dans ce jeu : la marque doit être dans le titre, ET AU MOINS UN
-    des autres mots DISTINCTIFS du jeu doit y être aussi (les mots génériques
-    — couleurs, tailles, état, voir GENERIC_WORDS — ne comptent pas : un sac
-    et un pendentif peuvent tous les deux être "noir", donc "marque + noir"
-    ne doit jamais suffire à confirmer le modèle). Assoupli par rapport à un
-    ET strict sur tous les mots, pour ne pas rater un vrai match à cause d'un
-    seul mot descriptif absent (ex. "whistle necklace" au lieu de "whistle
-    pendant" — même produit, formulation différente).
-
-    Si aucun mot distinctif ne reste après avoir retiré la marque et les mots
-    génériques, ce jeu ne peut jamais matcher via ce chemin assoupli (pas de
-    fallback permissif sur la marque seule).
-
-    Sans `brand_hint` (ou absent de ce jeu) : comportement strict d'origine,
-    tous les mots doivent être présents — fallback sûr quand on ne connaît
-    pas la marque de la recherche parente.
+    Vérifie si un jeu de mots-clés matche entièrement un titre : tous les mots
+    du jeu (déjà canonicalisés par build_keyword_sets/sanitize_keywords)
+    doivent être présents dans le titre une fois celui-ci lui-même
+    canonicalisé — voir SYNONYM_GROUPS pour la logique de canonicalisation.
     """
     if not kw_set:
         return False
-
-    if brand_hint and brand_hint in kw_set:
-        if brand_hint not in title_normalized:
-            return False
-        distinctive = [kw for kw in kw_set if kw != brand_hint and kw not in GENERIC_WORDS]
-        return bool(distinctive) and any(kw in title_normalized for kw in distinctive)
-
-    return all(kw in title_normalized for kw in kw_set)
+    title_words = set(_words_from_phrase(title_normalized))
+    return all(kw in title_words for kw in kw_set)
 
 
-def match_model(title_normalized: str, models: list, brand_hint: Optional[str] = None) -> Optional[int]:
+def match_model(title_normalized: str, models: list) -> Optional[int]:
     """
     Retourne l'id du product_model dont au moins un jeu de mots-clés (base ou
-    variante, voir build_keyword_sets) matche le titre normalisé (voir
-    keyword_set_matches). En cas de plusieurs matchs, choisit le jeu le plus
-    spécifique (le plus grand nombre de mots-clés). Retourne None si aucun
-    match.
+    variante, voir build_keyword_sets) matche entièrement le titre normalisé
+    (voir keyword_set_matches). En cas de plusieurs matchs, choisit le jeu le
+    plus spécifique (le plus grand nombre de mots-clés). Retourne None si
+    aucun match.
 
     `models` : itérable d'objets avec attributs `.id`, `.keywords_rules`,
     et `.search_variants` (ce dernier peut être absent/None).
-    `brand_hint` : nom de la marque de la recherche parente si connue
-    (ex. "lemaire" pour une recherche search_type='brand') — voir
-    keyword_set_matches pour l'effet exact.
     """
-    if brand_hint:
-        brand_hint = brand_hint.strip().lower()
-
     best_id: Optional[int] = None
     best_count = 0
 
@@ -174,7 +170,7 @@ def match_model(title_normalized: str, models: list, brand_hint: Optional[str] =
             getattr(m, "search_variants", None),
         )
         for kw_set in keyword_sets:
-            if keyword_set_matches(title_normalized, kw_set, brand_hint) and len(kw_set) > best_count:
+            if keyword_set_matches(title_normalized, kw_set) and len(kw_set) > best_count:
                 best_count = len(kw_set)
                 best_id = m.id
 

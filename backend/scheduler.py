@@ -139,8 +139,7 @@ def setup_scheduler(db_session_factory):
                 text(
                     """
                     SELECT pm.id AS model_id, pm.name, pm.search_variants, pm.keywords_rules,
-                           s.price_min, s.price_max, s.brand_ids, s.id AS search_id,
-                           s.name AS search_name, s.search_type
+                           s.price_min, s.price_max, s.brand_ids, s.id AS search_id
                     FROM product_models pm
                     JOIN searches s ON s.id = pm.search_id
                     WHERE pm.is_active = true
@@ -158,21 +157,16 @@ def setup_scheduler(db_session_factory):
             total_rejected = 0
 
             for model in models:
-                # Jeux de mots-clés acceptés (base OU une variante) — un résultat de
-                # recherche Vinted (fuzzy/pertinence, pas un ET strict) n'est accepté
-                # que s'il satisfait entièrement au moins un jeu. Vérifier uniquement
-                # les keywords_rules de base rejetterait les résultats trouvés PAR une
-                # variante qui n'utilise pas les mêmes mots (contradictoire avec le but
-                # même de la recherche par variantes).
+                # Jeux de mots-clés acceptés (base OU une variante, chacun un ET
+                # strict après canonicalisation des synonymes — voir keywords.py)
+                # — vérifier uniquement les keywords_rules de base rejetterait les
+                # résultats trouvés PAR une variante qui n'utilise pas les mêmes
+                # mots (contradictoire avec le but même de la recherche par
+                # variantes).
                 keyword_sets = build_keyword_sets(model.keywords_rules, model.search_variants)
                 if not keyword_sets:
                     continue
 
-                brand_hint = (
-                    model.search_name.strip().lower()
-                    if model.search_type == "brand" and model.search_name
-                    else None
-                )
                 brand_ids_list = csv_to_list(model.brand_ids)
 
                 variants = model.search_variants or []
@@ -200,11 +194,10 @@ def setup_scheduler(db_session_factory):
                             title = item.get("title") or ""
                             title_norm = normalize_title(title)
 
-                            # Rejeter tout résultat qui ne satisfait aucun des jeux de
-                            # mots-clés acceptés pour ce modèle (voir keyword_set_matches)
+                            # Rejeter tout résultat qui ne satisfait entièrement aucun
+                            # des jeux de mots-clés acceptés pour ce modèle
                             if not any(
-                                keyword_set_matches(title_norm, kw_set, brand_hint)
-                                for kw_set in keyword_sets
+                                keyword_set_matches(title_norm, kw_set) for kw_set in keyword_sets
                             ):
                                 total_rejected += 1
                                 continue
