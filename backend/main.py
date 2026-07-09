@@ -207,6 +207,25 @@ def get_health_logs(
     return _get_logs(level, limit, db)
 
 
+@app.post("/api/admin/variant-snapshot", status_code=202)
+def trigger_variant_snapshot(background_tasks: BackgroundTasks):
+    """
+    Déclenche immédiatement le job "variantes" (normalement toutes les 6h) en
+    arrière-plan — permet de forcer le backfill brand/état/photo/favoris sur
+    les anciennes annonces sans attendre le prochain cycle programmé.
+
+    Fonction de fond SYNCHRONE (voir manual_snapshot pour l'explication) :
+    Starlette la dispatche dans un threadpool séparé, sans geler l'API.
+    """
+    def _run():
+        from database.connection import SessionLocal
+        from scheduler import run_variant_snapshots
+        run_variant_snapshots(SessionLocal)
+
+    background_tasks.add_task(_run)
+    return {"status": "variant_snapshot_started"}
+
+
 @app.get("/api/logs")
 def get_logs(
     level: str = "INFO",
