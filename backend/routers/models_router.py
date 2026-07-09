@@ -155,7 +155,11 @@ def get_model_listings(
             """
             SELECT l.*,
                    (SELECT favourite_count FROM favourites_snapshots fs
-                    WHERE fs.listing_id = l.id ORDER BY snapshot_at DESC LIMIT 1) AS latest_favs
+                    WHERE fs.listing_id = l.id ORDER BY snapshot_at DESC LIMIT 1) AS latest_favs,
+                   EXTRACT(EPOCH FROM (COALESCE(l.disappeared_at, NOW()) - l.first_seen_at)) / 3600
+                       AS hours_online,
+                   EXTRACT(EPOCH FROM (COALESCE(l.disappeared_at, NOW()) - l.first_seen_at)) / 86400
+                       AS days_online
             FROM listings l
             WHERE l.product_model_id = :mid
             ORDER BY l.first_seen_at DESC

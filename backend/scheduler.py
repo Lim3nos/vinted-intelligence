@@ -129,7 +129,10 @@ def setup_scheduler(db_session_factory):
     # -----------------------------------------------------------------------
     def job_variant_snapshots():
         import asyncio
-        from collector import safe_request_paginated, normalize_title, _extract_price, _extract_seller, csv_to_list
+        from collector import (
+            safe_request_paginated, normalize_title, _extract_price, _extract_seller,
+            _detect_brand_in_title, csv_to_list,
+        )
         from keywords import build_keyword_sets, keyword_set_matches
         from datetime import datetime, timezone
 
@@ -202,50 +205,88 @@ def setup_scheduler(db_session_factory):
                                 total_rejected += 1
                                 continue
 
+                            price = _extract_price(item.get("price"))
+                            brand_name = (item.get("brand_title") or "").strip() or None
+                            item_status = item.get("status") or None
+                            brand_in_title = _detect_brand_in_title(title_norm, brand_name)
+                            favourite_count = int(item.get("favourite_count") or 0)
+                            view_count = item.get("view_count")
+                            photo_url = None
+                            photos = item.get("photos") or []
+                            if photos and isinstance(photos[0], dict):
+                                photo_url = photos[0].get("url") or photos[0].get("full_size_url")
+
                             existing = db.execute(
                                 text("SELECT id, product_model_id FROM listings WHERE vinted_id=:vid"),
                                 {"vid": vinted_id},
                             ).fetchone()
 
                             if existing:
-                                # Rattacher au modèle si pas encore fait
-                                if not existing.product_model_id:
-                                    db.execute(
-                                        text("UPDATE listings SET product_model_id=:mid WHERE id=:lid"),
-                                        {"mid": model.model_id, "lid": existing.id},
-                                    )
+                                # Rattacher au modèle si pas encore fait + backfill des champs
+                                # manquants (annonces trouvées avant ce fix, qui n'avaient
+                                # jamais brand/état/photo — voir historique du bug)
+                                db.execute(
+                                    text(
+                                        """
+                                        UPDATE listings
+                                        SET product_model_id = COALESCE(product_model_id, :mid),
+                                            brand = COALESCE(brand, :brand),
+                                            item_status = COALESCE(item_status, :item_status),
+                                            photo_url = COALESCE(photo_url, :photo_url)
+                                        WHERE id = :lid
+                                        """
+                                    ),
+                                    {"mid": model.model_id, "lid": existing.id,
+                                     "brand": brand_name, "item_status": item_status, "photo_url": photo_url},
+                                )
                             else:
                                 # Insérer avec product_model_id direct (trouvé via variante,
-                                # titre vérifié ci-dessus)
-                                price = _extract_price(item.get("price"))
+                                # titre vérifié ci-dessus) — mêmes champs que le snapshot principal
                                 seller_info = _extract_seller(item)
                                 url = item.get("url") or ""
                                 is_sold_from_api = item.get("can_be_sold") is False
-                                db.execute(
+                                row = db.execute(
                                     text(
                                         """
                                         INSERT INTO listings (
                                             vinted_id, search_id, product_model_id,
                                             title, title_normalized, price,
-                                            seller_id, seller_login, url,
+                                            brand, brand_in_title, item_status,
+                                            seller_id, seller_login, url, photo_url,
                                             first_seen_at, last_seen_at, consecutive_absences,
                                             is_sold
                                         ) VALUES (
                                             :vid, :sid, :mid,
                                             :title, :title_norm, :price,
-                                            :seller_id, :seller_login, :url,
+                                            :brand, :brand_in_title, :item_status,
+                                            :seller_id, :seller_login, :url, :photo_url,
                                             :now, :now, 0,
                                             :is_sold
                                         ) ON CONFLICT (vinted_id) DO NOTHING
+                                        RETURNING id
                                         """
                                     ),
                                     {
                                         "vid": vinted_id, "sid": model.search_id, "mid": model.model_id,
                                         "title": title, "title_norm": title_norm, "price": price,
-                                        **seller_info, "url": url, "now": now_utc,
+                                        "brand": brand_name, "brand_in_title": brand_in_title,
+                                        "item_status": item_status,
+                                        **seller_info, "url": url, "photo_url": photo_url, "now": now_utc,
                                         "is_sold": is_sold_from_api,
                                     },
-                                )
+                                ).fetchone()
+                                if row:
+                                    db.execute(
+                                        text(
+                                            """
+                                            INSERT INTO favourites_snapshots
+                                                (listing_id, vinted_id, favourite_count, view_count, snapshot_at)
+                                            VALUES (:lid, :vid, :fav, :views, :now)
+                                            """
+                                        ),
+                                        {"lid": row.id, "vid": vinted_id,
+                                         "fav": favourite_count, "views": view_count, "now": now_utc},
+                                    )
                                 total_new += 1
                         except Exception:
                             continue

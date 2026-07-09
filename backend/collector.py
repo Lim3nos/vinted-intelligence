@@ -810,12 +810,16 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             SET is_sold = true, disappeared_at = :now,
                                 final_price = :price, time_to_disappear_hours = :life_h,
                                 last_seen_at = :now, consecutive_absences = 0,
-                                product_model_id = COALESCE(product_model_id, :model_id)
+                                product_model_id = COALESCE(product_model_id, :model_id),
+                                brand = COALESCE(brand, :brand),
+                                item_status = COALESCE(item_status, :item_status),
+                                photo_url = COALESCE(photo_url, :photo_url)
                             WHERE id = :lid
                             """
                         ),
                         {"now": now_utc, "price": price, "life_h": life_hours,
-                         "model_id": matched_model_id, "lid": listing_id},
+                         "model_id": matched_model_id, "lid": listing_id,
+                         "brand": brand_name, "item_status": item_status, "photo_url": photo_url},
                     )
                     db.execute(
                         text(
@@ -838,11 +842,15 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             UPDATE listings
                             SET last_seen_at = :now,
                                 consecutive_absences = 0,
-                                product_model_id = COALESCE(product_model_id, :model_id)
+                                product_model_id = COALESCE(product_model_id, :model_id),
+                                brand = COALESCE(brand, :brand),
+                                item_status = COALESCE(item_status, :item_status),
+                                photo_url = COALESCE(photo_url, :photo_url)
                             WHERE id = :lid
                             """
                         ),
-                        {"now": now_utc, "lid": listing_id, "model_id": matched_model_id},
+                        {"now": now_utc, "lid": listing_id, "model_id": matched_model_id,
+                         "brand": brand_name, "item_status": item_status, "photo_url": photo_url},
                     )
                     db.execute(
                         text(
