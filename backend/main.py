@@ -585,36 +585,38 @@ def debug_scrape(q: str = "lemaire", db: Session = Depends(get_db)):
 
 
 @app.post("/api/admin/warmup", status_code=202)
-async def warmup(
-    body: dict,
-    db: Session = Depends(get_db),
-):
+def warmup(body: dict):
     """
     Mode warm-up : 3 snapshots espacés de 20 min sur les recherches indiquées.
-    Lance en arrière-plan.
+    Lance en arrière-plan dans un thread dédié.
+
+    IMPORTANT : run_snapshot() bloque (time.sleep() dans safe_request). Un
+    asyncio.create_task() tournerait sur la boucle événementielle principale
+    et gèlerait toute l'API pendant chaque cycle de scraping. threading.Thread
+    isole ça complètement du serveur HTTP.
     """
-    from fastapi import BackgroundTasks
+    import asyncio
+    import threading
     from collector import run_snapshot
     from database.connection import SessionLocal
-    import asyncio
+    import time as _time
 
     search_ids = body.get("search_ids", [])
     if not search_ids:
         return {"status": "no_searches_provided"}
 
-    async def _warmup():
+    def _warmup():
         for _ in range(3):
             for sid in search_ids:
                 db2 = SessionLocal()
                 try:
-                    await run_snapshot(sid, db2)
+                    asyncio.run(run_snapshot(sid, db2))
                 finally:
                     db2.close()
             log_to_db("INFO", "api", "Warm-up cycle terminé — pause 20 min")
-            await asyncio.sleep(1200)
+            _time.sleep(1200)
 
-    import asyncio
-    asyncio.create_task(_warmup())
+    threading.Thread(target=_warmup, daemon=True).start()
     log_to_db(
         "INFO", "api",
         f"Warm-up démarré pour {len(search_ids)} recherche(s)",

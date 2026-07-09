@@ -118,18 +118,27 @@ def resume_search(search_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{search_id}/snapshot", status_code=202)
-async def manual_snapshot(search_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Déclenche un snapshot manuel immédiat (asynchrone)."""
-    from jobs import start_exploration_job
+def manual_snapshot(search_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Déclenche un snapshot manuel immédiat, exécuté dans un thread séparé.
+
+    IMPORTANT : la tâche de fond doit être une fonction SYNCHRONE (pas async def).
+    Starlette exécute les BackgroundTasks async directement sur la boucle événementielle
+    principale — si run_snapshot() bloque (time.sleep() dans safe_request), ça gèle
+    TOUTE l'API (plus aucune requête servie, y compris le healthcheck Railway) pendant
+    toute la durée du scraping. Une fonction sync est dispatchée dans un threadpool
+    séparé par Starlette, ce qui n'affecte pas le reste de l'API.
+    """
     search = db.execute(text("SELECT id FROM searches WHERE id=:sid"), {"sid": search_id}).fetchone()
     if not search:
         raise HTTPException(404, "Recherche introuvable")
 
-    async def _run():
+    def _run():
+        import asyncio
         from database.connection import SessionLocal
         db2 = SessionLocal()
         try:
-            await run_snapshot(search_id, db2)
+            asyncio.run(run_snapshot(search_id, db2))
         finally:
             db2.close()
 
