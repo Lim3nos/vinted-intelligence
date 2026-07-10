@@ -37,6 +37,7 @@ SYNONYM_GROUPS = [
     {"jacket", "veste", "giacca"},
     {"dress", "robe", "vestito"},
     {"shirt", "chemise", "camicia"},
+    {"blouse", "chemisier", "blusa", "camicetta"},
     {"skirt", "jupe", "gonna"},
     {"coat", "manteau", "cappotto"},
     {"belt", "ceinture", "cintura"},
@@ -102,7 +103,7 @@ def _words_from_phrase(phrase: str) -> list:
     return sanitize_keywords(words)
 
 
-def build_keyword_sets(keywords_rules, search_variants) -> list:
+def build_keyword_sets(keywords_rules, search_variants, brand_hint: Optional[str] = None) -> list:
     """
     Construit tous les jeux de mots-clés (ET) acceptés pour un modèle : le jeu
     de base (keywords_rules) et un jeu dérivé de chaque variante de recherche
@@ -114,15 +115,27 @@ def build_keyword_sets(keywords_rules, search_variants) -> list:
     (traduction, orthographe, formulation différente) sans jamais relâcher
     la précision : chaque jeu reste un ET strict sur tous ses mots.
 
+    Filtre en plus les variantes qui ne partagent AUCUN mot distinctif (hors
+    marque) avec le jeu de base curé — ex. Gemini a pu générer "marque + top"
+    pour un modèle "Blouse" : "top" ne recoupe ni "blouse" ni "chemisier", et
+    matcherait n'importe quel haut de la marque (pull, t-shirt, polo...).
+    Une variante n'est gardée que si elle recoupe la définition de base,
+    `brand_hint` (nom de la recherche si search_type='brand') permettant
+    d'exclure la marque elle-même de cette vérification de recoupement.
+
     Retourne une liste de listes de mots-clés (déjà canonicalisés), dédoublonnée.
     """
     sets = []
     seen = set()
 
     base = sanitize_keywords(_parse_json_list(keywords_rules))
+    base_key = frozenset(base)
     if base:
-        seen.add(frozenset(base))
+        seen.add(base_key)
         sets.append(base)
+
+    brand_c = _canonicalize(brand_hint.strip().lower()) if brand_hint else None
+    base_distinctive = (base_key - {brand_c}) if brand_c else base_key
 
     for variant in _parse_json_list(search_variants):
         words = _words_from_phrase(variant)
@@ -131,6 +144,12 @@ def build_keyword_sets(keywords_rules, search_variants) -> list:
         key = frozenset(words)
         if key in seen:
             continue
+
+        if base_distinctive:
+            variant_distinctive = key - ({brand_c} if brand_c else set())
+            if variant_distinctive.isdisjoint(base_distinctive):
+                continue
+
         seen.add(key)
         sets.append(words)
 
@@ -150,7 +169,7 @@ def keyword_set_matches(title_normalized: str, kw_set: list) -> bool:
     return all(kw in title_words for kw in kw_set)
 
 
-def match_model(title_normalized: str, models: list) -> Optional[int]:
+def match_model(title_normalized: str, models: list, brand_hint: Optional[str] = None) -> Optional[int]:
     """
     Retourne l'id du product_model dont au moins un jeu de mots-clés (base ou
     variante, voir build_keyword_sets) matche entièrement le titre normalisé
@@ -160,6 +179,9 @@ def match_model(title_normalized: str, models: list) -> Optional[int]:
 
     `models` : itérable d'objets avec attributs `.id`, `.keywords_rules`,
     et `.search_variants` (ce dernier peut être absent/None).
+    `brand_hint` : nom de la recherche parente si search_type='brand' — sert
+    uniquement à filtrer les variantes trop génériques dans build_keyword_sets,
+    ne relâche jamais le ET strict du matching lui-même.
     """
     best_id: Optional[int] = None
     best_count = 0
@@ -168,6 +190,7 @@ def match_model(title_normalized: str, models: list) -> Optional[int]:
         keyword_sets = build_keyword_sets(
             getattr(m, "keywords_rules", None),
             getattr(m, "search_variants", None),
+            brand_hint=brand_hint,
         )
         for kw_set in keyword_sets:
             if keyword_set_matches(title_normalized, kw_set) and len(kw_set) > best_count:

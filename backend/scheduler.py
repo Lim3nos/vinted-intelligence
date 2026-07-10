@@ -38,7 +38,8 @@ def run_variant_snapshots(db_session_factory):
             text(
                 """
                 SELECT pm.id AS model_id, pm.name, pm.search_variants, pm.keywords_rules,
-                       s.price_min, s.price_max, s.brand_ids, s.id AS search_id
+                       s.price_min, s.price_max, s.brand_ids, s.id AS search_id,
+                       s.name AS search_name, s.search_type
                 FROM product_models pm
                 JOIN searches s ON s.id = pm.search_id
                 WHERE pm.is_active = true
@@ -62,7 +63,12 @@ def run_variant_snapshots(db_session_factory):
             # résultats trouvés PAR une variante qui n'utilise pas les mêmes
             # mots (contradictoire avec le but même de la recherche par
             # variantes).
-            keyword_sets = build_keyword_sets(model.keywords_rules, model.search_variants)
+            brand_hint = (
+                model.search_name.strip().lower()
+                if model.search_type == "brand" and model.search_name
+                else None
+            )
+            keyword_sets = build_keyword_sets(model.keywords_rules, model.search_variants, brand_hint=brand_hint)
             if not keyword_sets:
                 continue
 
