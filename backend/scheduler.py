@@ -118,6 +118,14 @@ def run_variant_snapshots(db_session_factory):
                         if photos and isinstance(photos[0], dict):
                             photo_url = photos[0].get("url") or photos[0].get("full_size_url")
 
+                        pub_dt = None
+                        created_ts = item.get("created_at_ts")
+                        if created_ts:
+                            try:
+                                pub_dt = datetime.fromtimestamp(int(created_ts), tz=timezone.utc)
+                            except Exception:
+                                pass
+
                         existing = db.execute(
                             text("SELECT id, product_model_id FROM listings WHERE vinted_id=:vid"),
                             {"vid": vinted_id},
@@ -134,12 +142,14 @@ def run_variant_snapshots(db_session_factory):
                                     SET product_model_id = COALESCE(product_model_id, :mid),
                                         brand = COALESCE(brand, :brand),
                                         item_status = COALESCE(item_status, :item_status),
-                                        photo_url = COALESCE(photo_url, :photo_url)
+                                        photo_url = COALESCE(photo_url, :photo_url),
+                                        published_at = COALESCE(published_at, :published_at)
                                     WHERE id = :lid
                                     """
                                 ),
                                 {"mid": model.model_id, "lid": existing.id,
-                                 "brand": brand_name, "item_status": item_status, "photo_url": photo_url},
+                                 "brand": brand_name, "item_status": item_status, "photo_url": photo_url,
+                                 "published_at": pub_dt},
                             )
                         else:
                             # Insérer avec product_model_id direct (trouvé via variante,
@@ -156,14 +166,14 @@ def run_variant_snapshots(db_session_factory):
                                         brand, brand_in_title, item_status,
                                         seller_id, seller_login, url, photo_url,
                                         first_seen_at, last_seen_at, consecutive_absences,
-                                        is_sold
+                                        is_sold, published_at
                                     ) VALUES (
                                         :vid, :sid, :mid,
                                         :title, :title_norm, :price,
                                         :brand, :brand_in_title, :item_status,
                                         :seller_id, :seller_login, :url, :photo_url,
                                         :now, :now, 0,
-                                        :is_sold
+                                        :is_sold, :published_at
                                     ) ON CONFLICT (vinted_id) DO NOTHING
                                     RETURNING id
                                     """
@@ -174,7 +184,7 @@ def run_variant_snapshots(db_session_factory):
                                     "brand": brand_name, "brand_in_title": brand_in_title,
                                     "item_status": item_status,
                                     **seller_info, "url": url, "photo_url": photo_url, "now": now_utc,
-                                    "is_sold": is_sold_from_api,
+                                    "is_sold": is_sold_from_api, "published_at": pub_dt,
                                 },
                             ).fetchone()
                             if row:

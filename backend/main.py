@@ -42,6 +42,9 @@ async def lifespan(app: FastAPI):
         "ALTER TABLE product_models ADD COLUMN IF NOT EXISTS search_variants JSONB DEFAULT '[]'::jsonb",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS extra_params JSONB DEFAULT '{}'::jsonb",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS raw_vinted_url TEXT",
+        # Vraie date de publication Vinted (created_at_ts) — distincte de first_seen_at
+        # (date de découverte par notre scraper, qui peut accuser du retard)
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
         # Table dédiée tokens auth Vinted (nullable, sans contraintes strictes)
         """CREATE TABLE IF NOT EXISTS vinted_auth (
             key TEXT PRIMARY KEY,

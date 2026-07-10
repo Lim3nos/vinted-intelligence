@@ -72,12 +72,14 @@ def get_listings(
                 l.url,
                 l.photo_url,
                 l.first_seen_at,
+                l.published_at,
                 l.last_seen_at,
                 l.disappeared_at,
                 l.is_sold,
                 l.time_to_disappear_hours,
-                EXTRACT(EPOCH FROM (COALESCE(l.disappeared_at, NOW()) - l.first_seen_at)) / 3600
-                    AS hours_active
+                EXTRACT(EPOCH FROM (
+                    COALESCE(l.disappeared_at, NOW()) - COALESCE(l.published_at, l.first_seen_at)
+                )) / 3600 AS hours_active
             FROM listings l
             LEFT JOIN searches s ON s.id = l.search_id
             {where}

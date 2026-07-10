@@ -907,7 +907,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             seller_id, seller_login, seller_total_sales, seller_feedback_score,
                             url, photo_url,
                             first_seen_at, last_seen_at, consecutive_absences,
-                            published_hour_utc, published_day_of_week
+                            published_hour_utc, published_day_of_week, published_at
                         ) VALUES (
                             :vinted_id, :search_id, :model_id,
                             :title, :title_norm, :price,
@@ -915,7 +915,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             :seller_id, :seller_login, :seller_total_sales, :seller_feedback_score,
                             :url, :photo_url,
                             :now, :now, 0,
-                            :pub_hour, :pub_dow
+                            :pub_hour, :pub_dow, :published_at
                         ) RETURNING id
                         """
                     ),
@@ -929,6 +929,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                         "url": url, "photo_url": photo_url,
                         "now": now_utc,
                         "pub_hour": published_hour_utc, "pub_dow": published_day_of_week,
+                        "published_at": pub_dt,
                     },
                 )
                 listing_id = row.fetchone().id
