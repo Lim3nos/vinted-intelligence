@@ -386,46 +386,55 @@ def setup_scheduler(db_session_factory):
     # -----------------------------------------------------------------------
     # Enregistrement des jobs
     # -----------------------------------------------------------------------
+    # misfire_grace_time généreux : avec l'exécuteur mono-thread (voir plus haut),
+    # un job peut légitimement démarrer en retard parce qu'un autre tournait
+    # encore sur l'unique thread. Avec 300s (5 min, valeur d'origine), un
+    # main_snapshots retardé par un variant_snapshots long (peut prendre
+    # 10-20+ min) était purement et simplement SAUTÉ par APScheduler plutôt
+    # qu'exécuté en retard — observé en prod (last_snapshot_at à 5.8h de
+    # retard sans aucune erreur). Aucun de ces jobs n'a de contrainte temps
+    # réel : les retarder est sans risque, les sauter fait perdre un cycle
+    # entier de collecte.
     scheduler.add_job(
         job_main_snapshots,
         trigger=IntervalTrigger(hours=3),
         id="main_snapshots",
-        misfire_grace_time=300,
+        misfire_grace_time=3600,
         replace_existing=True,
     )
     scheduler.add_job(
         job_score_recalculation,
         trigger=IntervalTrigger(hours=6),
         id="score_recalculation",
-        misfire_grace_time=300,
+        misfire_grace_time=1800,
         replace_existing=True,
     )
     scheduler.add_job(
         job_weekly_cleanup,
         trigger=CronTrigger(day_of_week="sun", hour=3, minute=0),
         id="weekly_cleanup",
-        misfire_grace_time=300,
+        misfire_grace_time=1800,
         replace_existing=True,
     )
     scheduler.add_job(
         job_health_check,
         trigger=IntervalTrigger(hours=1),
         id="health_check",
-        misfire_grace_time=300,
+        misfire_grace_time=1800,
         replace_existing=True,
     )
     scheduler.add_job(
         lambda: run_variant_snapshots(db_session_factory),
         trigger=IntervalTrigger(hours=6),
         id="variant_snapshots",
-        misfire_grace_time=300,
+        misfire_grace_time=1800,
         replace_existing=True,
     )
     scheduler.add_job(
         lambda: run_stale_refresh(db_session_factory),
         trigger=IntervalTrigger(hours=1),
         id="stale_refresh",
-        misfire_grace_time=300,
+        misfire_grace_time=1800,
         replace_existing=True,
     )
 
