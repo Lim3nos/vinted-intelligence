@@ -383,6 +383,7 @@ def refresh_stale_listings(db: Session, limit: int = 40, stale_after_hours: int 
                     """
                     UPDATE listings
                     SET last_seen_at = :now,
+                        consecutive_absences = 0,
                         item_status = COALESCE(item_status, :status),
                         brand = COALESCE(brand, :brand)
                     WHERE id = :lid
