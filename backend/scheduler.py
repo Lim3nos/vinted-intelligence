@@ -244,7 +244,18 @@ def setup_scheduler(db_session_factory):
     Tous les jobs ont misfire_grace_time=300 (5 min de tolérance).
     Les exceptions sont loggées en base et ne font pas crasher les autres jobs.
     """
-    scheduler = BackgroundScheduler(timezone="UTC")
+    # Exécuteur mono-thread : plusieurs jobs (main_snapshots, variant_snapshots,
+    # stale_refresh) écrivent tous sur la table `listings`. Avec le pool de
+    # threads par défaut d'APScheduler, deux jobs peuvent s'exécuter en même
+    # temps et se verrouiller mutuellement (deadlock PostgreSQL observé en
+    # prod entre main_snapshots et stale_refresh). Aucun de ces jobs n'a de
+    # contrainte temps réel — les exécuter strictement en séquence est sûr.
+    from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
+
+    scheduler = BackgroundScheduler(
+        timezone="UTC",
+        executors={"default": APSThreadPoolExecutor(1)},
+    )
 
     # -----------------------------------------------------------------------
     # Job 1 — Snapshots automatiques

@@ -51,6 +51,7 @@ SYNONYM_GROUPS = [
     {"shirt", "chemise", "camicia"},
     {"blouse", "chemisier", "blusa", "camicetta"},
     {"tank", "debardeur"},
+    {"body", "bodysuit", "justaucorps"},
     {"skirt", "jupe", "gonna"},
     {"coat", "manteau", "cappotto"},
     {"belt", "ceinture", "cintura"},

@@ -810,12 +810,13 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     except Exception:
         pass
 
-    # max_pages=15 (1440 annonces max) : une recherche par marque seule (brand_ids,
-    # sans search_text) est un catalogue propre côté Vinted — pas de risque de bruit
-    # en allant plus profond, seulement un risque de RATER des annonces plus anciennes
-    # si on s'arrête trop tôt (confirmé : jusqu'à 960 annonces existantes pour une
-    # marque, largement au-delà des 480 couvertes par les 5 pages précédentes).
-    items = safe_request_paginated(scraper_params, max_pages=15)
+    # max_pages=10 : Vinted refuse toute page au-delà (HTTP 400 "Page offset is
+    # invalid" confirmé empiriquement à page=11, quel que soit price/brand) —
+    # plafond dur côté API, pas une limite de notre pagination. Aller plus loin
+    # ne fait que gaspiller une requête (+ délai anti-blocage) à chaque cycle
+    # pour un échec garanti ; safe_request_paginated s'arrête proprement dessus
+    # de toute façon, mais autant ne pas la déclencher.
+    items = safe_request_paginated(scraper_params, max_pages=10)
 
     # 3. Erreur réseau → abandonner sans toucher aux données existantes
     if items is None:
