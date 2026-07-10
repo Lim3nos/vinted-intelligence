@@ -10,9 +10,21 @@ d'une recherche au modèle concerné, quel que soit leur contenu réel.
 
 import json
 import re
+import unicodedata
 from typing import Optional
 
 MIN_KEYWORD_LENGTH = 2
+
+
+def _strip_accents(text: str) -> str:
+    """
+    Retire les accents (é -> e, etc.). collector.py::normalize_title() fait de
+    même sur les titres avant stockage — les mots-clés doivent subir la même
+    normalisation, sinon un mot-clé accentué ("débardeur") ne matche jamais un
+    titre normalisé ("debardeur", accent déjà supprimé au stockage).
+    """
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 # Groupes de synonymes/traductions (fr/en/it/de) : des mots qui désignent LA
 # MÊME CHOSE dans des langues ou formulations différentes (ex: pendentif =
@@ -38,7 +50,7 @@ SYNONYM_GROUPS = [
     {"dress", "robe", "vestito"},
     {"shirt", "chemise", "camicia"},
     {"blouse", "chemisier", "blusa", "camicetta"},
-    {"tank", "débardeur"},
+    {"tank", "debardeur"},
     {"skirt", "jupe", "gonna"},
     {"coat", "manteau", "cappotto"},
     {"belt", "ceinture", "cintura"},
@@ -75,7 +87,7 @@ def sanitize_keywords(keywords: list) -> list:
     for kw in keywords or []:
         if not isinstance(kw, str):
             continue
-        kw_clean = _canonicalize(kw.strip().lower())
+        kw_clean = _canonicalize(_strip_accents(kw.strip().lower()))
         if len(kw_clean) < MIN_KEYWORD_LENGTH:
             continue
         if kw_clean in seen:
