@@ -992,13 +992,15 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                                 product_model_id = COALESCE(product_model_id, :model_id),
                                 brand = COALESCE(brand, :brand),
                                 item_status = COALESCE(item_status, :item_status),
-                                photo_url = COALESCE(photo_url, :photo_url)
+                                photo_url = COALESCE(photo_url, :photo_url),
+                                published_at = COALESCE(published_at, :published_at)
                             WHERE id = :lid
                             """
                         ),
                         {"now": now_utc, "price": price, "life_h": life_hours,
                          "model_id": matched_model_id, "lid": listing_id,
-                         "brand": brand_name, "item_status": item_status, "photo_url": photo_url},
+                         "brand": brand_name, "item_status": item_status, "photo_url": photo_url,
+                         "published_at": pub_dt},
                     )
                     db.execute(
                         text(
@@ -1024,12 +1026,14 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                                 product_model_id = COALESCE(product_model_id, :model_id),
                                 brand = COALESCE(brand, :brand),
                                 item_status = COALESCE(item_status, :item_status),
-                                photo_url = COALESCE(photo_url, :photo_url)
+                                photo_url = COALESCE(photo_url, :photo_url),
+                                published_at = COALESCE(published_at, :published_at)
                             WHERE id = :lid
                             """
                         ),
                         {"now": now_utc, "lid": listing_id, "model_id": matched_model_id,
-                         "brand": brand_name, "item_status": item_status, "photo_url": photo_url},
+                         "brand": brand_name, "item_status": item_status, "photo_url": photo_url,
+                         "published_at": pub_dt},
                     )
                     db.execute(
                         text(
