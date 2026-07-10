@@ -205,6 +205,26 @@ def run_variant_snapshots(db_session_factory):
         db.close()
 
 
+def run_stale_refresh(db_session_factory, limit: int = 40):
+    """
+    Revisite individuellement les annonces suivies (rattachées à un modèle) qui
+    n'ont pas été revues depuis plus de 6h — voir collector.py::refresh_stale_listings
+    pour le détail. Extrait en fonction de module pour être appelable à la fois
+    par le job APScheduler (toutes les heures) et par
+    POST /api/admin/refresh-stale-listings (déclenchement manuel).
+    """
+    from collector import refresh_stale_listings
+
+    db = db_session_factory()
+    try:
+        return refresh_stale_listings(db, limit=limit)
+    except Exception as e:
+        log_to_db("ERROR", "scheduler", f"Erreur run_stale_refresh: {e}")
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
 def setup_scheduler(db_session_factory):
     """
     Configure et retourne le planificateur APScheduler.
@@ -381,6 +401,13 @@ def setup_scheduler(db_session_factory):
         lambda: run_variant_snapshots(db_session_factory),
         trigger=IntervalTrigger(hours=6),
         id="variant_snapshots",
+        misfire_grace_time=300,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: run_stale_refresh(db_session_factory),
+        trigger=IntervalTrigger(hours=1),
+        id="stale_refresh",
         misfire_grace_time=300,
         replace_existing=True,
     )

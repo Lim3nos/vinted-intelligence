@@ -226,6 +226,24 @@ def trigger_variant_snapshot(background_tasks: BackgroundTasks):
     return {"status": "variant_snapshot_started"}
 
 
+@app.post("/api/admin/refresh-stale-listings", status_code=202)
+def trigger_stale_refresh(background_tasks: BackgroundTasks, limit: int = Query(40, le=200)):
+    """
+    Revisite immédiatement (page détail Vinted) les annonces suivies qui n'ont
+    pas été revues depuis plus de 6h — cas des annonces poussées hors de la
+    fenêtre du scan principal sur une marque à fort volume (voir
+    collector.py::refresh_stale_listings). Normalement automatique toutes les
+    heures ; ce endpoint permet de forcer sans attendre.
+    """
+    def _run():
+        from database.connection import SessionLocal
+        from scheduler import run_stale_refresh
+        run_stale_refresh(SessionLocal, limit=limit)
+
+    background_tasks.add_task(_run)
+    return {"status": "stale_refresh_started", "limit": limit}
+
+
 @app.get("/api/logs")
 def get_logs(
     level: str = "INFO",

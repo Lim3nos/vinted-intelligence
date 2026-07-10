@@ -243,6 +243,179 @@ def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
         return None
 
 
+def _extract_html_str_field(html: str, field: str) -> Optional[str]:
+    """Extrait un champ string du JSON embarqué dans la page HTML d'un item (brut ou échappé)."""
+    for pattern in (rf'"{field}"\s*:\s*"([^"]*)"', rf'\\"{field}\\"\s*:\s*\\"([^\\"]*)\\"'):
+        m = re.search(pattern, html)
+        if m and m.group(1):
+            return m.group(1)
+    return None
+
+
+def _extract_html_int_field(html: str, field: str) -> Optional[int]:
+    """Extrait un champ numérique du JSON embarqué dans la page HTML d'un item (brut ou échappé)."""
+    for pattern in (rf'"{field}"\s*:\s*(\d+)', rf'\\"{field}\\"\s*:\s*(\d+)'):
+        m = re.search(pattern, html)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def fetch_item_snapshot(vinted_id: int) -> Optional[dict]:
+    """
+    Récupère l'état actuel d'une annonce via sa page HTML publique (sans auth) :
+    statut vendu, favoris, état, marque. Sert au rattrapage des annonces suivies
+    qui ne réapparaissent plus dans le scan principal (catalogue trop volumineux
+    pour être entièrement revisité à chaque cycle — voir refresh_stale_listings).
+
+    Retourne un dict {is_closed, favourite_count, status, brand_title} ou None
+    si la vérification a échoué (réseau, timeout, 429) — jamais confondre avec
+    des valeurs réellement vides.
+    """
+    try:
+        session = _get_curl_session()
+        resp = session.get(
+            f"{BASE_URL}/items/{vinted_id}",
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "fr-FR,fr;q=0.9",
+                "Referer": BASE_URL + "/catalog",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+            },
+            timeout=20,
+        )
+
+        if resp.status_code == 429:
+            return None
+        if resp.status_code == 404:
+            return {"is_closed": True, "favourite_count": None, "status": None, "brand_title": None}
+        if resp.status_code != 200:
+            return None
+
+        html = resp.text
+        is_closed = None
+        for pattern in (r'"is_closed"\s*:\s*(true|false)', r'\\"is_closed\\"\s*:\s*(true|false)'):
+            m = re.search(pattern, html)
+            if m:
+                is_closed = m.group(1) == "true"
+                break
+
+        return {
+            "is_closed": is_closed,
+            "favourite_count": _extract_html_int_field(html, "favourite_count"),
+            "status": _extract_html_str_field(html, "status"),
+            "brand_title": _extract_html_str_field(html, "brand_title"),
+        }
+    except Exception as e:
+        logger.debug("Erreur fetch_item_snapshot %s: %s", vinted_id, e)
+        return None
+
+
+def refresh_stale_listings(db: Session, limit: int = 40, stale_after_hours: int = 6) -> dict:
+    """
+    Revisite individuellement les annonces SUIVIES (rattachées à un modèle) qui
+    n'ont pas été revues depuis plus de `stale_after_hours` — cas des annonces
+    poussées hors de la fenêtre du scan principal (catalogue trop volumineux,
+    voir run_snapshot) qui ne seraient sinon jamais rafraîchies ni jamais
+    éligibles à la détection de disparition.
+
+    Limité aux listings avec product_model_id NOT NULL : peu nombreux (annonces
+    suivies uniquement), donc sûr d'appeler ce endpoint par requête individuelle
+    sans exploser le volume de requêtes Vinted.
+
+    Retourne {"checked", "refreshed", "sold_confirmed", "failed"}.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_after_hours)
+
+    stale = db.execute(
+        text(
+            """
+            SELECT id, vinted_id, first_seen_at
+            FROM listings
+            WHERE product_model_id IS NOT NULL
+              AND is_sold = false
+              AND last_seen_at < :cutoff
+            ORDER BY last_seen_at ASC
+            LIMIT :limit
+            """
+        ),
+        {"cutoff": cutoff, "limit": limit},
+    ).fetchall()
+
+    if not stale:
+        return {"checked": 0, "refreshed": 0, "sold_confirmed": 0, "failed": 0}
+
+    now_utc = datetime.now(timezone.utc)
+    refreshed = 0
+    sold_confirmed = 0
+    failed = 0
+
+    for row in stale:
+        time.sleep(random.uniform(1.0, 2.5))
+        snap = fetch_item_snapshot(row.vinted_id)
+
+        if snap is None:
+            failed += 1
+            continue
+
+        if snap["is_closed"]:
+            fe = row.first_seen_at
+            if fe and fe.tzinfo is None:
+                fe = fe.replace(tzinfo=timezone.utc)
+            life_hours = (now_utc - fe).total_seconds() / 3600 if fe else None
+            db.execute(
+                text(
+                    """
+                    UPDATE listings
+                    SET is_sold = true, disappeared_at = :now,
+                        time_to_disappear_hours = :life_h, last_seen_at = :now
+                    WHERE id = :lid
+                    """
+                ),
+                {"now": now_utc, "life_h": life_hours, "lid": row.id},
+            )
+            sold_confirmed += 1
+        else:
+            db.execute(
+                text(
+                    """
+                    UPDATE listings
+                    SET last_seen_at = :now,
+                        item_status = COALESCE(item_status, :status),
+                        brand = COALESCE(brand, :brand)
+                    WHERE id = :lid
+                    """
+                ),
+                {"now": now_utc, "lid": row.id,
+                 "status": snap["status"], "brand": snap["brand_title"]},
+            )
+            if snap["favourite_count"] is not None:
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO favourites_snapshots (listing_id, vinted_id, favourite_count, snapshot_at)
+                        VALUES (:lid, :vid, :fav, :now)
+                        """
+                    ),
+                    {"lid": row.id, "vid": row.vinted_id, "fav": snap["favourite_count"], "now": now_utc},
+                )
+            refreshed += 1
+
+    db.commit()
+
+    result = {"checked": len(stale), "refreshed": refreshed,
+              "sold_confirmed": sold_confirmed, "failed": failed}
+    log_to_db(
+        "INFO", "collector",
+        f"Rattrapage annonces stagnantes — {refreshed} rafraîchies, "
+        f"{sold_confirmed} confirmées vendues, {failed} échecs",
+        result,
+    )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Nettoyage des titres
 # ---------------------------------------------------------------------------
