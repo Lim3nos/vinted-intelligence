@@ -38,6 +38,7 @@ SYNONYM_GROUPS = [
     {"dress", "robe", "vestito"},
     {"shirt", "chemise", "camicia"},
     {"blouse", "chemisier", "blusa", "camicetta"},
+    {"tank", "débardeur"},
     {"skirt", "jupe", "gonna"},
     {"coat", "manteau", "cappotto"},
     {"belt", "ceinture", "cintura"},
