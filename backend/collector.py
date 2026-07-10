@@ -313,17 +313,21 @@ def fetch_item_snapshot(vinted_id: int) -> Optional[dict]:
         return None
 
 
-def refresh_stale_listings(db: Session, limit: int = 40, stale_after_hours: int = 6) -> dict:
+def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int = 2) -> dict:
     """
-    Revisite individuellement les annonces SUIVIES (rattachées à un modèle) qui
-    n'ont pas été revues depuis plus de `stale_after_hours` — cas des annonces
+    Revisite individuellement les annonces actives (suivies ou non) qui n'ont
+    pas été revues depuis plus de `stale_after_hours` — cas des annonces
     poussées hors de la fenêtre du scan principal (catalogue trop volumineux,
-    voir run_snapshot) qui ne seraient sinon jamais rafraîchies ni jamais
-    éligibles à la détection de disparition.
+    voir run_snapshot) qui ne seraient sinon jamais rafraîchies, ni jamais
+    éligibles à une détection de disparition fiable.
 
-    Limité aux listings avec product_model_id NOT NULL : peu nombreux (annonces
-    suivies uniquement), donc sûr d'appeler ce endpoint par requête individuelle
-    sans exploser le volume de requêtes Vinted.
+    Couvre TOUT le pool actif (pas seulement les annonces rattachées à un
+    modèle) : la vérification individuelle par page détail est la source de
+    vérité la plus fiable pour la présence/disparition — bien plus que le
+    comptage d'absences du scan principal, qui ne voit jamais qu'une fraction
+    du catalogue à la fois sur une marque à fort volume. Priorité aux
+    annonces non revues depuis le plus longtemps (ORDER BY last_seen_at ASC),
+    suivies ou non.
 
     Retourne {"checked", "refreshed", "sold_confirmed", "failed"}.
     """
@@ -334,8 +338,7 @@ def refresh_stale_listings(db: Session, limit: int = 40, stale_after_hours: int 
             """
             SELECT id, vinted_id, first_seen_at
             FROM listings
-            WHERE product_model_id IS NOT NULL
-              AND is_sold = false
+            WHERE is_sold = false
               AND last_seen_at < :cutoff
             ORDER BY last_seen_at ASC
             LIMIT :limit

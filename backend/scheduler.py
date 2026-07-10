@@ -221,12 +221,12 @@ def run_variant_snapshots(db_session_factory):
         db.close()
 
 
-def run_stale_refresh(db_session_factory, limit: int = 40):
+def run_stale_refresh(db_session_factory, limit: int = 100):
     """
-    Revisite individuellement les annonces suivies (rattachées à un modèle) qui
-    n'ont pas été revues depuis plus de 6h — voir collector.py::refresh_stale_listings
+    Revisite individuellement les annonces actives (suivies ou non) qui n'ont
+    pas été revues depuis plus de 2h — voir collector.py::refresh_stale_listings
     pour le détail. Extrait en fonction de module pour être appelable à la fois
-    par le job APScheduler (toutes les heures) et par
+    par le job APScheduler (toutes les 20 min) et par
     POST /api/admin/refresh-stale-listings (déclenchement manuel).
     """
     from collector import refresh_stale_listings
@@ -442,9 +442,9 @@ def setup_scheduler(db_session_factory):
     )
     scheduler.add_job(
         lambda: run_stale_refresh(db_session_factory),
-        trigger=IntervalTrigger(hours=1),
+        trigger=IntervalTrigger(minutes=20),
         id="stale_refresh",
-        misfire_grace_time=1800,
+        misfire_grace_time=900,
         replace_existing=True,
     )
 
