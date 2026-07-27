@@ -336,7 +336,7 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
     stale = db.execute(
         text(
             """
-            SELECT id, vinted_id, first_seen_at
+            SELECT id, vinted_id, first_seen_at, price
             FROM listings
             WHERE is_sold = false
               AND last_seen_at < :cutoff
@@ -373,11 +373,12 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
                     """
                     UPDATE listings
                     SET is_sold = true, disappeared_at = :now,
-                        time_to_disappear_hours = :life_h, last_seen_at = :now
+                        time_to_disappear_hours = :life_h, last_seen_at = :now,
+                        final_price = COALESCE(final_price, :price)
                     WHERE id = :lid
                     """
                 ),
-                {"now": now_utc, "life_h": life_hours, "lid": row.id},
+                {"now": now_utc, "life_h": life_hours, "lid": row.id, "price": row.price},
             )
             sold_confirmed += 1
         else:
