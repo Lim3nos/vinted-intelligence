@@ -905,8 +905,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                 {"vid": vinted_id},
             ).fetchone()
 
-            # Matching vers un product_model
-            matched_model_id = match_model(title_norm, active_models, brand_hint=brand_hint)
+            # Matching vers un product_model (item_brand=marque confirmée par
+            # Vinted — comble le mot-clé de marque quand le vendeur ne l'a pas
+            # retapé dans le titre, voir keywords.py::keyword_set_matches)
+            matched_model_id = match_model(
+                title_norm, active_models, brand_hint=brand_hint, item_brand=brand_name
+            )
 
             if not existing:
                 # Déduplication avant insertion

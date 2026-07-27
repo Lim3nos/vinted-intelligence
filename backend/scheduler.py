@@ -98,17 +98,20 @@ def run_variant_snapshots(db_session_factory):
 
                         title = item.get("title") or ""
                         title_norm = normalize_title(title)
+                        brand_name = (item.get("brand_title") or "").strip() or None
 
                         # Rejeter tout résultat qui ne satisfait entièrement aucun
-                        # des jeux de mots-clés acceptés pour ce modèle
+                        # des jeux de mots-clés acceptés pour ce modèle. item_brand
+                        # comble le mot-clé de marque si le vendeur ne l'a pas
+                        # retapé dans le titre (voir keywords.py).
                         if not any(
-                            keyword_set_matches(title_norm, kw_set) for kw_set in keyword_sets
+                            keyword_set_matches(title_norm, kw_set, item_brand=brand_name)
+                            for kw_set in keyword_sets
                         ):
                             total_rejected += 1
                             continue
 
                         price = _extract_price(item.get("price"))
-                        brand_name = (item.get("brand_title") or "").strip() or None
                         item_status = item.get("status") or None
                         brand_in_title = _detect_brand_in_title(title_norm, brand_name)
                         favourite_count = int(item.get("favourite_count") or 0)

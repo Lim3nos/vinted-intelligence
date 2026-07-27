@@ -449,7 +449,7 @@ def rematch_listings(db: Session = Depends(get_db)):
     # Listings sans model_id pour les search_id qui ont des modèles
     listings = db.execute(
         text(
-            "SELECT id, search_id, title_normalized FROM listings "
+            "SELECT id, search_id, title_normalized, brand FROM listings "
             "WHERE product_model_id IS NULL "
             "  AND title_normalized IS NOT NULL "
             "  AND search_id = ANY(:sids)"
@@ -467,7 +467,11 @@ def rematch_listings(db: Session = Depends(get_db)):
             continue
 
         title = listing.title_normalized or ""
-        best_id = match_model(title, candidates, brand_hint=brand_hint_by_search.get(listing.search_id))
+        best_id = match_model(
+            title, candidates,
+            brand_hint=brand_hint_by_search.get(listing.search_id),
+            item_brand=listing.brand,
+        )
 
         if best_id:
             db.execute(

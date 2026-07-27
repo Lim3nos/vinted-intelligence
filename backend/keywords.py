@@ -42,6 +42,7 @@ def _strip_accents(text: str) -> str:
 # "noir" ou en "laine", ça ne les rend pas interchangeables.
 SYNONYM_GROUPS = [
     {"pendentif", "pendant", "necklace", "collier", "ciondolo", "collana"},
+    {"sifflet", "whistle", "fischietto", "pfeife"},
     {"wool", "laine", "lana", "wolle"},
     {"trousers", "pantalon", "pants", "pantaloni", "hose"},
     {"bag", "sac", "borsa"},
@@ -170,20 +171,34 @@ def build_keyword_sets(keywords_rules, search_variants, brand_hint: Optional[str
     return sets
 
 
-def keyword_set_matches(title_normalized: str, kw_set: list) -> bool:
+def keyword_set_matches(title_normalized: str, kw_set: list, item_brand: Optional[str] = None) -> bool:
     """
     Vérifie si un jeu de mots-clés matche entièrement un titre : tous les mots
     du jeu (déjà canonicalisés par build_keyword_sets/sanitize_keywords)
     doivent être présents dans le titre une fois celui-ci lui-même
     canonicalisé — voir SYNONYM_GROUPS pour la logique de canonicalisation.
+
+    `item_brand` : marque de l'annonce telle que confirmée par Vinted
+    (champ `brand_title` de l'API, indépendant du texte du titre). De
+    nombreux vendeurs ne retapent pas le nom de la marque dans le titre —
+    sans ceci, un mot-clé de marque (ex. "lemaire") ne matcherait jamais
+    ces annonces alors que Vinted les identifie bien comme telles. Ajouté
+    aux mots du titre avant vérification, jamais utilisé seul.
     """
     if not kw_set:
         return False
     title_words = set(_words_from_phrase(title_normalized))
+    if item_brand:
+        title_words |= set(_words_from_phrase(item_brand))
     return all(kw in title_words for kw in kw_set)
 
 
-def match_model(title_normalized: str, models: list, brand_hint: Optional[str] = None) -> Optional[int]:
+def match_model(
+    title_normalized: str,
+    models: list,
+    brand_hint: Optional[str] = None,
+    item_brand: Optional[str] = None,
+) -> Optional[int]:
     """
     Retourne l'id du product_model dont au moins un jeu de mots-clés (base ou
     variante, voir build_keyword_sets) matche entièrement le titre normalisé
@@ -196,6 +211,8 @@ def match_model(title_normalized: str, models: list, brand_hint: Optional[str] =
     `brand_hint` : nom de la recherche parente si search_type='brand' — sert
     uniquement à filtrer les variantes trop génériques dans build_keyword_sets,
     ne relâche jamais le ET strict du matching lui-même.
+    `item_brand` : marque Vinted confirmée de cette annonce précise (voir
+    keyword_set_matches) — comble le mot-clé de marque si absent du titre.
     """
     best_id: Optional[int] = None
     best_count = 0
@@ -207,7 +224,7 @@ def match_model(title_normalized: str, models: list, brand_hint: Optional[str] =
             brand_hint=brand_hint,
         )
         for kw_set in keyword_sets:
-            if keyword_set_matches(title_normalized, kw_set) and len(kw_set) > best_count:
+            if keyword_set_matches(title_normalized, kw_set, item_brand=item_brand) and len(kw_set) > best_count:
                 best_count = len(kw_set)
                 best_id = m.id
 
