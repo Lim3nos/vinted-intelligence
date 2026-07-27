@@ -40,7 +40,7 @@ def list_models(
     active_days: int = 0,
     db: Session = Depends(get_db),
 ):
-    filters = "WHERE pm.is_active = true AND pm.signal_score >= :min_score"
+    filters = "WHERE pm.is_active = true AND COALESCE(pm.signal_score, 0) >= :min_score"
     params: dict = {"min_score": min_score}
 
     if priority != "all":
@@ -48,7 +48,7 @@ def list_models(
         params["priority"] = priority
 
     rows = db.execute(
-        text(f"SELECT pm.* FROM product_models pm {filters} ORDER BY pm.signal_score DESC"),
+        text(f"SELECT pm.* FROM product_models pm {filters} ORDER BY pm.signal_score DESC NULLS LAST"),
         params,
     ).fetchall()
     return [dict(r._mapping) for r in rows]
