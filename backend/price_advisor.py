@@ -54,6 +54,7 @@ def suggest_price(product_model_id: int, my_item_status: str, db: Session) -> di
             FROM listings
             WHERE product_model_id = :mid
               AND is_sold = true
+              AND sale_confirmed = true
               AND time_to_disappear_hours IS NOT NULL
               AND time_to_disappear_hours < 72
               AND disappeared_at >= :cutoff

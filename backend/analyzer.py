@@ -95,6 +95,7 @@ def calculate_signal_score(model_id: int, db: Session) -> tuple[int, str]:
             FROM listings l
             WHERE l.product_model_id = :mid
               AND l.is_sold = true
+              AND l.sale_confirmed = true
               AND l.time_to_disappear_hours IS NOT NULL
               AND l.time_to_disappear_hours < 72
               AND l.disappeared_at >= :cutoff
@@ -155,6 +156,7 @@ def calculate_signal_score(model_id: int, db: Session) -> tuple[int, str]:
             FROM listings
             WHERE product_model_id = :mid
               AND is_sold = true
+              AND sale_confirmed = true
               AND time_to_disappear_hours IS NOT NULL
               AND disappeared_at >= :cutoff
             """
@@ -297,6 +299,7 @@ def calculate_heatmap(model_id: int, db: Session) -> list[dict]:
             FROM listings l
             WHERE l.product_model_id = :mid
               AND l.is_sold = true
+              AND l.sale_confirmed = true
               AND l.time_to_disappear_hours IS NOT NULL
               AND l.time_to_disappear_hours < :max_life
               AND l.time_to_disappear_hours > 0

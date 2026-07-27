@@ -177,7 +177,7 @@ def _try_refresh_token(refresh_token: str) -> Tuple[Optional[str], Optional[int]
     return None, None
 
 
-def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
+def _check_item_sold_via_html(vinted_id: int) -> tuple[Optional[bool], bool]:
     """
     Vérifie le statut vendu en scrapant la page HTML publique de l'item.
 
@@ -185,10 +185,15 @@ def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
     Le champ 'is_closed' (True=vendu) est accessible sans auth dans ce JSON.
     Fonctionne depuis Railway sans auth, sur tous les items publics.
 
-    Returns:
-        True  → item vendu (is_closed=true ou page 404)
-        False → item encore actif (is_closed=false)
-        None  → vérification impossible (erreur réseau, timeout, 429)
+    Une page 404 signifie que l'annonce a disparu, mais PAS qu'elle a été
+    vendue — elle peut avoir été supprimée par le vendeur. On ne peut donc
+    pas la compter comme une vente confirmée (voir `confirmed` ci-dessous).
+
+    Returns (gone, confirmed):
+        gone=True,  confirmed=True  → is_closed/can_be_sold confirme une vraie vente
+        gone=True,  confirmed=False → page 404 : disparu, mais pas confirmé vendu
+        gone=False, confirmed=True  → item toujours actif
+        gone=None,  confirmed=False → vérification impossible (réseau, timeout, 429)
     """
     try:
         session = _get_curl_session()
@@ -206,11 +211,11 @@ def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
         )
 
         if resp.status_code == 429:
-            return None
+            return None, False
         if resp.status_code == 404:
-            return True   # page introuvable = item supprimé/vendu
+            return True, False   # page introuvable = disparu, vente non confirmée
         if resp.status_code != 200:
-            return None
+            return None, False
 
         # Extraire is_closed depuis le JSON embarqué dans le HTML.
         # Vinted sérialise parfois en JSON échappé (\"is_closed\") dans les scripts,
@@ -222,7 +227,7 @@ def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
         ):
             m = re.search(pattern, resp.text)
             if m:
-                return m.group(1) == "true"
+                return (m.group(1) == "true"), True
 
         # Fallback : chercher can_be_sold
         for pattern2 in (
@@ -233,10 +238,10 @@ def _check_item_sold_via_html(vinted_id: int) -> Optional[bool]:
             m2 = re.search(pattern2, resp.text)
             if m2:
                 can_be_sold = m2.group(1) == "true"
-                return not can_be_sold  # can_be_sold=false → vendu=True
+                return (not can_be_sold), True  # can_be_sold=false → vendu=True, confirmé
 
         logger.debug("HTML item %s: is_closed non trouvé dans %d bytes", vinted_id, len(resp.text))
-        return None
+        return None, False
 
     except Exception as e:
         logger.debug("Erreur HTML item check %s: %s", vinted_id, e)
@@ -268,9 +273,13 @@ def fetch_item_snapshot(vinted_id: int) -> Optional[dict]:
     qui ne réapparaissent plus dans le scan principal (catalogue trop volumineux
     pour être entièrement revisité à chaque cycle — voir refresh_stale_listings).
 
-    Retourne un dict {is_closed, favourite_count, status, brand_title} ou None
-    si la vérification a échoué (réseau, timeout, 429) — jamais confondre avec
-    des valeurs réellement vides.
+    Retourne un dict {is_closed, sale_confirmed, favourite_count, status,
+    brand_title} ou None si la vérification a échoué (réseau, timeout, 429) —
+    jamais confondre avec des valeurs réellement vides.
+
+    sale_confirmed distingue une vraie vente confirmée (is_closed=true lu sur
+    une page vivante) d'une simple disparition (page 404 : peut être une
+    suppression par le vendeur, pas forcément une vente).
     """
     try:
         session = _get_curl_session()
@@ -290,7 +299,8 @@ def fetch_item_snapshot(vinted_id: int) -> Optional[dict]:
         if resp.status_code == 429:
             return None
         if resp.status_code == 404:
-            return {"is_closed": True, "favourite_count": None, "status": None, "brand_title": None}
+            return {"is_closed": True, "sale_confirmed": False,
+                     "favourite_count": None, "status": None, "brand_title": None}
         if resp.status_code != 200:
             return None
 
@@ -304,6 +314,7 @@ def fetch_item_snapshot(vinted_id: int) -> Optional[dict]:
 
         return {
             "is_closed": is_closed,
+            "sale_confirmed": is_closed is True,
             "favourite_count": _extract_html_int_field(html, "favourite_count"),
             "status": _extract_html_str_field(html, "status"),
             "brand_title": _extract_html_str_field(html, "brand_title"),
@@ -374,11 +385,13 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
                     UPDATE listings
                     SET is_sold = true, disappeared_at = :now,
                         time_to_disappear_hours = :life_h, last_seen_at = :now,
-                        final_price = COALESCE(final_price, :price)
+                        final_price = COALESCE(final_price, :price),
+                        sale_confirmed = :confirmed
                     WHERE id = :lid
                     """
                 ),
-                {"now": now_utc, "life_h": life_hours, "lid": row.id, "price": row.price},
+                {"now": now_utc, "life_h": life_hours, "lid": row.id,
+                 "price": row.price, "confirmed": snap["sale_confirmed"]},
             )
             sold_confirmed += 1
         else:
@@ -967,7 +980,8 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             """
                             UPDATE listings
                             SET is_sold = true, disappeared_at = :now,
-                                final_price = :price, time_to_disappear_hours = NULL
+                                final_price = :price, time_to_disappear_hours = NULL,
+                                sale_confirmed = true
                             WHERE id = :lid
                             """
                         ),
@@ -994,6 +1008,7 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             SET is_sold = true, disappeared_at = :now,
                                 final_price = :price, time_to_disappear_hours = :life_h,
                                 last_seen_at = :now, consecutive_absences = 0,
+                                sale_confirmed = true,
                                 product_model_id = COALESCE(product_model_id, :model_id),
                                 brand = COALESCE(brand, :brand),
                                 item_status = COALESCE(item_status, :item_status),
@@ -1115,20 +1130,27 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
 
             if updated and updated.consecutive_absences >= 4:
                 # Priorité 1 : page HTML item (is_closed dans JSON embarqué, sans auth)
+                # sale_confirmed=True seulement si Vinted a explicitement confirmé la
+                # vente (is_closed/can_be_sold) — une simple disparition (404, absences
+                # répétées, absente du catalogue vendeur) reste non confirmée : elle
+                # peut être une suppression, pas une vente.
+                item_gone = False
+                sale_confirmed = False
                 if verify_budget > 0:
-                    html_result = _check_item_sold_via_html(row.vinted_id)
+                    html_gone, html_confirmed = _check_item_sold_via_html(row.vinted_id)
                     verify_budget -= 1
-                    if html_result is False:
+                    if html_gone is False:
                         # Item encore actif → reset absences
                         db.execute(
                             text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
                             {"lid": row.id},
                         )
                         continue
-                    if html_result is True:
+                    if html_gone is True:
                         item_gone = True
+                        sale_confirmed = html_confirmed
                     else:
-                        # html_result=None → erreur réseau, fallback catalog
+                        # html_gone=None → erreur réseau, fallback catalog
                         item_still_active = None
                         if verify_budget > 0:
                             item_still_active = _check_seller_still_has_item(
@@ -1141,10 +1163,14 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                                 {"lid": row.id},
                             )
                             continue
+                        # Absence du catalogue vendeur ou seuil d'absences atteint :
+                        # gone, mais jamais confirmé comme vente.
                         item_gone = (item_still_active is False) or (updated.consecutive_absences >= 8)
+                        sale_confirmed = False
                 else:
-                    # Budget épuisé → fallback absences uniquement
+                    # Budget épuisé → fallback absences uniquement, non confirmé
                     item_gone = updated.consecutive_absences >= 8
+                    sale_confirmed = False
 
                 if item_gone:
                     first_seen = updated.first_seen_at
@@ -1161,12 +1187,14 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                             SET is_sold = true,
                                 disappeared_at = :now,
                                 time_to_disappear_hours = :life_h,
-                                final_price = :price
+                                final_price = :price,
+                                sale_confirmed = :confirmed
                             WHERE id = :lid
                             """
                         ),
                         {"now": now_utc, "life_h": life_hours,
-                         "price": updated.price, "lid": row.id},
+                         "price": updated.price, "lid": row.id,
+                         "confirmed": sale_confirmed},
                     )
                     disappeared_count += 1
 

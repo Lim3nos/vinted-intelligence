@@ -76,6 +76,7 @@ def get_listings(
                 l.last_seen_at,
                 l.disappeared_at,
                 l.is_sold,
+                l.sale_confirmed,
                 l.time_to_disappear_hours,
                 EXTRACT(EPOCH FROM (
                     COALESCE(l.disappeared_at, NOW()) - COALESCE(l.published_at, l.first_seen_at)
@@ -117,12 +118,17 @@ def get_listings_stats(
             SELECT
                 COUNT(*) FILTER (WHERE l.is_sold = false)  AS active_count,
                 COUNT(*) FILTER (WHERE l.is_sold = true)   AS sold_count,
+                COUNT(*) FILTER (WHERE l.is_sold = true AND l.sale_confirmed = true)
+                                                             AS confirmed_sold_count,
+                COUNT(*) FILTER (WHERE l.is_sold = true AND l.sale_confirmed IS NOT TRUE)
+                                                             AS removed_unconfirmed_count,
                 COUNT(*)                                    AS total_count,
                 AVG(l.price) FILTER (WHERE l.is_sold=false) AS avg_price_active,
                 MIN(l.price) FILTER (WHERE l.is_sold=false) AS min_price_active,
                 MAX(l.price) FILTER (WHERE l.is_sold=false) AS max_price_active,
                 AVG(l.time_to_disappear_hours)
-                    FILTER (WHERE l.is_sold=true)           AS avg_hours_to_sell,
+                    FILTER (WHERE l.is_sold=true AND l.sale_confirmed=true)
+                                                             AS avg_hours_to_sell,
                 COUNT(*) FILTER (WHERE l.first_seen_at >= NOW() - INTERVAL '24 hours'
                                    AND l.is_sold = false)  AS new_last_24h
             FROM listings l

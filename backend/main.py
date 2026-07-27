@@ -45,6 +45,11 @@ async def lifespan(app: FastAPI):
         # Vraie date de publication Vinted (created_at_ts) — distincte de first_seen_at
         # (date de découverte par notre scraper, qui peut accuser du retard)
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
+        # Distingue une vente réellement confirmée (is_closed/can_be_sold vu sur
+        # Vinted) d'une simple disparition (404, absences répétées) qui peut être
+        # une suppression par le vendeur — évite de compter des suppressions
+        # comme des ventes dans le prix suggéré et le score de signal
+        "ALTER TABLE listings ADD COLUMN IF NOT EXISTS sale_confirmed BOOLEAN",
         # Table dédiée tokens auth Vinted (nullable, sans contraintes strictes)
         """CREATE TABLE IF NOT EXISTS vinted_auth (
             key TEXT PRIMARY KEY,
@@ -280,18 +285,20 @@ def verify_sold_listings(
     return {"status": "verify_started", "message": "Vérification en arrière-plan — résultat dans /api/logs"}
 
 
-def _do_verify_sold(db):
+def _do_verify_sold(db, limit: int = 400):
     """
     Vérification effective des listings vendus via page HTML item — exécuté en background.
 
     Méthode : scrape /items/{id} → extrait is_closed depuis JSON embarqué dans le HTML.
     Fonctionne sans auth, retourne le vrai statut is_closed.
     Fallback sur catalog vendeur si la page HTML échoue (timeout, 429).
-    """
-    from datetime import timedelta
-    import time, random
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+    Sert aussi de rattrapage pour sale_confirmed (colonne ajoutée pour distinguer
+    une vraie vente d'une simple suppression) : traite en priorité tout listing
+    is_sold=true dont sale_confirmed n'a jamais été déterminé (IS NOT TRUE),
+    sans limite de date — jusqu'à `limit` par appel.
+    """
+    import time, random
 
     candidates = db.execute(
         text(
@@ -299,12 +306,12 @@ def _do_verify_sold(db):
             SELECT id, vinted_id, title, disappeared_at, seller_id
             FROM listings
             WHERE is_sold = true
-              AND disappeared_at >= :cutoff
-            ORDER BY disappeared_at DESC
-            LIMIT 100
+              AND sale_confirmed IS NOT TRUE
+            ORDER BY disappeared_at DESC NULLS LAST
+            LIMIT :limit
             """
         ),
-        {"cutoff": cutoff},
+        {"limit": limit},
     ).fetchall()
 
     if not candidates:
@@ -315,30 +322,34 @@ def _do_verify_sold(db):
 
     reset_count = 0
     confirmed_count = 0
+    removed_unconfirmed_count = 0
     skipped_count = 0
 
     for listing in candidates:
         try:
             # Méthode 1 : page HTML item (is_closed exact)
             time.sleep(random.uniform(1.0, 2.5))
-            result = _check_item_sold_via_html(listing.vinted_id)
+            gone, confirmed = _check_item_sold_via_html(listing.vinted_id)
 
-            # Fallback méthode 2 : catalog vendeur
-            if result is None and listing.seller_id:
+            # Fallback méthode 2 : catalog vendeur — ne confirme jamais une vente,
+            # dit seulement si l'annonce est encore là ou non.
+            if gone is None and listing.seller_id:
                 result_catalog = _check_seller_still_has_item(
                     listing.vinted_id, listing.seller_id, listing.title or ""
                 )
-                # catalog: True=actif → pas vendu ; False=absent → vendu
-                result = (not result_catalog) if result_catalog is not None else None
+                # catalog: True=actif → pas vendu ; False=absent → disparu (non confirmé)
+                if result_catalog is not None:
+                    gone = not result_catalog
+                    confirmed = False
 
-            # result: True=vendu, False=encore actif, None=inconnu
-            if result is False:
+            if gone is False:
                 # Item encore actif → c'était un faux positif → reset
                 db.execute(
                     text(
                         """
                         UPDATE listings
                         SET is_sold = false,
+                            sale_confirmed = NULL,
                             disappeared_at = NULL,
                             time_to_disappear_hours = NULL,
                             final_price = NULL,
@@ -350,9 +361,23 @@ def _do_verify_sold(db):
                     {"lid": listing.id},
                 )
                 reset_count += 1
-            elif result is True:
-                # Confirmé vendu (is_closed=true ou page 404)
+            elif gone is True and confirmed:
+                # Vraie vente confirmée (is_closed=true ou can_be_sold=false)
+                db.execute(
+                    text("UPDATE listings SET sale_confirmed = true WHERE id = :lid"),
+                    {"lid": listing.id},
+                )
                 confirmed_count += 1
+            elif gone is True and not confirmed:
+                # Disparu (404 ou absent du catalogue vendeur) mais vente non
+                # confirmée — probablement une suppression, pas une vente.
+                # Reste is_sold=true (n'est plus en vente) mais exclu des
+                # calculs de prix/score.
+                db.execute(
+                    text("UPDATE listings SET sale_confirmed = false WHERE id = :lid"),
+                    {"lid": listing.id},
+                )
+                removed_unconfirmed_count += 1
             else:
                 # Vérification impossible (timeout, 429, parse error) → ne pas toucher
                 skipped_count += 1
@@ -367,9 +392,16 @@ def _do_verify_sold(db):
         "checked": len(candidates),
         "reset": reset_count,
         "confirmed_sold": confirmed_count,
+        "removed_unconfirmed": removed_unconfirmed_count,
         "skipped": skipped_count,
     }
-    log_to_db("INFO", "api", f"verify-sold : {reset_count} réinitialisés, {confirmed_count} confirmés, {skipped_count} ignorés", result)
+    log_to_db(
+        "INFO", "api",
+        f"verify-sold : {confirmed_count} ventes confirmées, "
+        f"{removed_unconfirmed_count} disparitions non confirmées (suppressions probables), "
+        f"{reset_count} faux positifs réinitialisés, {skipped_count} ignorés",
+        result,
+    )
 
 
 @app.post("/api/admin/reset-and-rematch", status_code=202)

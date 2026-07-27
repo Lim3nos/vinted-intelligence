@@ -166,14 +166,14 @@ def run_variant_snapshots(db_session_factory):
                                         brand, brand_in_title, item_status,
                                         seller_id, seller_login, url, photo_url,
                                         first_seen_at, last_seen_at, consecutive_absences,
-                                        is_sold, published_at
+                                        is_sold, sale_confirmed, published_at
                                     ) VALUES (
                                         :vid, :sid, :mid,
                                         :title, :title_norm, :price,
                                         :brand, :brand_in_title, :item_status,
                                         :seller_id, :seller_login, :url, :photo_url,
                                         :now, :now, 0,
-                                        :is_sold, :published_at
+                                        :is_sold, :sale_confirmed, :published_at
                                     ) ON CONFLICT (vinted_id) DO NOTHING
                                     RETURNING id
                                     """
@@ -184,7 +184,8 @@ def run_variant_snapshots(db_session_factory):
                                     "brand": brand_name, "brand_in_title": brand_in_title,
                                     "item_status": item_status,
                                     **seller_info, "url": url, "photo_url": photo_url, "now": now_utc,
-                                    "is_sold": is_sold_from_api, "published_at": pub_dt,
+                                    "is_sold": is_sold_from_api, "sale_confirmed": is_sold_from_api,
+                                    "published_at": pub_dt,
                                 },
                             ).fetchone()
                             if row:
