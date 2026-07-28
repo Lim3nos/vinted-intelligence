@@ -32,6 +32,7 @@ class SearchCreate(BaseModel):
     price_min: int = 50
     price_max: int = 120
     snapshot_interval_hours: int = 3
+    brand_group: Optional[str] = None
 
 
 class SearchUpdate(BaseModel):
@@ -42,6 +43,7 @@ class SearchUpdate(BaseModel):
     price_min: Optional[int] = None
     price_max: Optional[int] = None
     snapshot_interval_hours: Optional[int] = None
+    brand_group: Optional[str] = None
 
 
 @router.get("")
@@ -58,8 +60,9 @@ def create_search(body: SearchCreate, db: Session = Depends(get_db)):
         text(
             """
             INSERT INTO searches (name, search_type, keywords, brand_ids, catalog_ids,
-                                  price_min, price_max, snapshot_interval_hours, is_active)
-            VALUES (:name, :stype, :kw, :bids, :cids, :pmin, :pmax, :interval, true)
+                                  price_min, price_max, snapshot_interval_hours,
+                                  brand_group, is_active)
+            VALUES (:name, :stype, :kw, :bids, :cids, :pmin, :pmax, :interval, :bgroup, true)
             RETURNING *
             """
         ),
@@ -68,6 +71,7 @@ def create_search(body: SearchCreate, db: Session = Depends(get_db)):
             "bids": body.brand_ids, "cids": body.catalog_ids,
             "pmin": body.price_min, "pmax": body.price_max,
             "interval": body.snapshot_interval_hours,
+            "bgroup": body.brand_group,
         },
     ).fetchone()
     db.commit()
