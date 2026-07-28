@@ -782,11 +782,23 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         {"search_id": search_id},
     )
 
-    # 1b. Charger les product_models actifs de cette recherche pour le matching
+    # 1b. Charger les product_models actifs pour le matching — pas seulement
+    # ceux de cette recherche précise, mais de tout son "brand_group" (ex: la
+    # recherche par brand_ids Vinted ET la recherche texte de la même marque
+    # partagent les mêmes modèles, pour ne rien perdre des annonces qui
+    # mentionnent la marque sans être taguées avec le bon brand_id officiel).
     active_models = db.execute(
         text(
-            "SELECT id, keywords_rules, search_variants FROM product_models "
-            "WHERE search_id = :sid AND is_active = true"
+            """
+            WITH grp AS (
+                SELECT COALESCE(brand_group, id::text) AS g FROM searches WHERE id = :sid
+            )
+            SELECT pm.id, pm.keywords_rules, pm.search_variants
+            FROM product_models pm
+            JOIN searches s ON s.id = pm.search_id
+            WHERE pm.is_active = true
+              AND COALESCE(s.brand_group, s.id::text) = (SELECT g FROM grp)
+            """
         ),
         {"sid": search_id},
     ).fetchall()

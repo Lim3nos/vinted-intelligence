@@ -42,6 +42,11 @@ async def lifespan(app: FastAPI):
         "ALTER TABLE product_models ADD COLUMN IF NOT EXISTS search_variants JSONB DEFAULT '[]'::jsonb",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS extra_params JSONB DEFAULT '{}'::jsonb",
         "ALTER TABLE searches ADD COLUMN IF NOT EXISTS raw_vinted_url TEXT",
+        # Regroupe plusieurs recherches (ex: une par brand_ids Vinted, une par
+        # texte libre) qui ciblent la même marque, pour qu'elles alimentent les
+        # mêmes product_models — évite de perdre les annonces qui mentionnent
+        # la marque sans être taguées avec le brand_id officiel Vinted
+        "ALTER TABLE searches ADD COLUMN IF NOT EXISTS brand_group TEXT",
         # Vraie date de publication Vinted (created_at_ts) — distincte de first_seen_at
         # (date de découverte par notre scraper, qui peut accuser du retard)
         "ALTER TABLE listings ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ",
@@ -418,10 +423,26 @@ def rematch_listings(db: Session = Depends(get_db)):
     """
     Rattache rétroactivement les listings sans product_model_id aux modèles actifs
     en appliquant les keywords_rules. À appeler après avoir validé de nouveaux clusters.
+
+    Résout les candidats par "brand_group" (voir collector.py::run_snapshot) et pas
+    seulement par search_id exact : une annonce trouvée par la recherche texte d'une
+    marque doit pouvoir matcher les modèles créés via la recherche brand_ids de la
+    même marque, et vice versa.
     """
     from collections import defaultdict
 
-    # Charger les modèles actifs
+    # Toutes les recherches, avec leur clé de groupe (brand_group si défini, sinon
+    # la recherche elle-même = son propre groupe)
+    all_searches = db.execute(
+        text("SELECT id, name, search_type, brand_group FROM searches")
+    ).fetchall()
+    group_of_search = {s.id: (s.brand_group or str(s.id)) for s in all_searches}
+    brand_hint_by_search = {
+        s.id: (s.name.strip().lower() if s.search_type == "brand" and s.name else None)
+        for s in all_searches
+    }
+
+    # Charger les modèles actifs, regroupés par la clé de groupe de LEUR recherche
     model_rows = db.execute(
         text(
             "SELECT id, search_id, keywords_rules, search_variants "
@@ -429,24 +450,14 @@ def rematch_listings(db: Session = Depends(get_db)):
         )
     ).fetchall()
 
-    models_by_search: dict = defaultdict(list)
+    models_by_group: dict = defaultdict(list)
     for m in model_rows:
-        models_by_search[m.search_id].append(m)
+        models_by_group[group_of_search.get(m.search_id, str(m.search_id))].append(m)
 
-    distinct_search_ids = list(models_by_search.keys())
+    groups_with_models = {g for g in models_by_group if models_by_group[g]}
+    search_ids_in_scope = [sid for sid, g in group_of_search.items() if g in groups_with_models]
 
-    # Nom de marque par recherche (search_type='brand') — sert à filtrer les
-    # variantes trop génériques dans build_keyword_sets (voir keywords.py)
-    search_rows = db.execute(
-        text("SELECT id, name, search_type FROM searches WHERE id = ANY(:sids)"),
-        {"sids": distinct_search_ids},
-    ).fetchall()
-    brand_hint_by_search = {
-        s.id: (s.name.strip().lower() if s.search_type == "brand" and s.name else None)
-        for s in search_rows
-    }
-
-    # Listings sans model_id pour les search_id qui ont des modèles
+    # Listings sans model_id pour les search_id dont le groupe a des modèles
     listings = db.execute(
         text(
             "SELECT id, search_id, title_normalized, brand FROM listings "
@@ -454,14 +465,14 @@ def rematch_listings(db: Session = Depends(get_db)):
             "  AND title_normalized IS NOT NULL "
             "  AND search_id = ANY(:sids)"
         ),
-        {"sids": distinct_search_ids},
+        {"sids": search_ids_in_scope},
     ).fetchall()
 
     matched = 0
     skipped_no_candidates = 0
 
     for listing in listings:
-        candidates = models_by_search.get(listing.search_id, [])
+        candidates = models_by_group.get(group_of_search.get(listing.search_id), [])
         if not candidates:
             skipped_no_candidates += 1
             continue
@@ -486,7 +497,7 @@ def rematch_listings(db: Session = Depends(get_db)):
         "matched": matched,
         "total_checked": len(listings),
         "models_loaded": len(model_rows),
-        "search_ids_with_models": distinct_search_ids,
+        "search_ids_with_models": search_ids_in_scope,
         "skipped_no_candidates": skipped_no_candidates,
     }
     log_to_db("INFO", "api", f"Rematch listings : {matched}/{len(listings)} rattachés", result)

@@ -222,12 +222,23 @@ def calculate_signal_score(model_id: int, db: Session) -> tuple[int, str]:
 
 def recalculate_scores_for_search(search_id: int, db: Session) -> int:
     """
-    Recalcule les scores de signal pour tous les modèles actifs d'une recherche.
+    Recalcule les scores de signal pour tous les modèles actifs du brand_group
+    de cette recherche (pas seulement les modèles rattachés exactement à cette
+    recherche — voir active_models dans collector.py::run_snapshot).
     Retourne le nombre de modèles recalculés.
     """
     models = db.execute(
         text(
-            "SELECT id FROM product_models WHERE search_id = :sid AND is_active = true"
+            """
+            WITH grp AS (
+                SELECT COALESCE(brand_group, id::text) AS g FROM searches WHERE id = :sid
+            )
+            SELECT pm.id
+            FROM product_models pm
+            JOIN searches s ON s.id = pm.search_id
+            WHERE pm.is_active = true
+              AND COALESCE(s.brand_group, s.id::text) = (SELECT g FROM grp)
+            """
         ),
         {"sid": search_id},
     ).fetchall()
