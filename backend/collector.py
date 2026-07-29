@@ -812,7 +812,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     # status_ids, size_ids, color_ids...) doivent être envoyés au format tableau
     # `cle[]=valeur` — un simple `cle=valeur` est silencieusement ignoré par l'API
     # Vinted (confirmé : un brand_ids=X sans crochets ne filtre pas du tout par marque).
-    scraper_params = {}
+    # Tri par date de publication décroissante : Vinted trie par pertinence par
+    # défaut (aucun paramètre order envoyé jusqu'ici), ce qui n'a pas de sens
+    # pour un scan périodique dont le but est de repérer les nouvelles annonces
+    # au plus vite — surtout sur les marques à fort volume où le scan ne couvre
+    # qu'un nombre de pages limité par cycle.
+    scraper_params = {"order": "newest_first"}
     if search.keywords:
         scraper_params["search_text"] = search.keywords
     if search.brand_ids:
