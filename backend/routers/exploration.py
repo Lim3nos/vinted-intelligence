@@ -20,6 +20,11 @@ class ExplorationParams(BaseModel):
     price_min: int = 50
     price_max: int = 120
     filter_level: int = 3
+    # Recherche suivie existante à utiliser comme filtre de marque officiel
+    # Vinted (brand_ids) en plus du mot-clé texte — sans ça, le mot-clé seul
+    # cherche sur tout Vinted, toutes marques confondues (ex: "vide poche"
+    # sans filtre de marque remonte surtout Baccarat/Murano/etc., pas Hermès).
+    search_id: Optional[int] = None
 
 
 class ValidateClusterBody(BaseModel):

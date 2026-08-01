@@ -13,7 +13,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from collector import safe_request_paginated
+from collector import safe_request_paginated, csv_to_list
 from filters import apply_all_filter_levels
 from ai_clustering import cluster_listings_by_model
 from logger import log_to_db
@@ -73,6 +73,19 @@ def _run_exploration_job(job_id: str, params: dict) -> None:
             scraper_params["search_text"] = query
         else:
             scraper_params["search_text"] = query
+
+        # Filtre de marque officiel Vinted (brand_ids), repris de la recherche
+        # suivie sélectionnée — sans ça, le mot-clé texte seul cherche sur tout
+        # Vinted, toutes marques confondues (ex: "vide poche" sans filtre remonte
+        # surtout Baccarat/Murano/etc., pas la marque voulue).
+        search_id = params.get("search_id")
+        if search_id:
+            search_row = db.execute(
+                text("SELECT brand_ids FROM searches WHERE id = :sid"),
+                {"sid": search_id},
+            ).fetchone()
+            if search_row and search_row.brand_ids:
+                scraper_params["brand_ids[]"] = csv_to_list(search_row.brand_ids)
 
         price_min = params.get("price_min")
         price_max = params.get("price_max")
