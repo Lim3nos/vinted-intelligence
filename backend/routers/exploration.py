@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from database.connection import get_db
 from jobs import start_exploration_job, get_job_status
-from keywords import sanitize_keywords
+from keywords import sanitize_keywords, cap_keywords_for_matching
 
 router = APIRouter(tags=["exploration"])
 
@@ -76,7 +76,22 @@ def validate_cluster(body: ValidateClusterBody, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(409, f"Un modèle '{body.model_name}' existe déjà pour cette recherche (id={existing.id})")
 
-    clean_keywords = sanitize_keywords(body.suggested_keywords)
+    search_row = None
+    if body.search_id:
+        search_row = db.execute(
+            text("SELECT keywords, name, search_type FROM searches WHERE id=:sid"), {"sid": body.search_id}
+        ).fetchone()
+    brand_hint = (
+        search_row.name.strip().lower()
+        if search_row and search_row.search_type == "brand" and search_row.name
+        else None
+    )
+
+    # Limite à 2 mots (marque + mot le plus distinctif) — voir
+    # cap_keywords_for_matching : Gemini mélange souvent un mot distinctif
+    # avec des traductions/synonymes, qui n'exigent pas d'être tous présents
+    # ensemble dans un titre (voir keywords.py pour le détail du bug corrigé).
+    clean_keywords = cap_keywords_for_matching(body.suggested_keywords, brand_hint=brand_hint)
     if not clean_keywords:
         raise HTTPException(
             400,
@@ -106,11 +121,7 @@ def validate_cluster(body: ValidateClusterBody, db: Session = Depends(get_db)):
         # Générer les variantes de recherche en arrière-plan (Gemini)
         try:
             from ai_clustering import generate_search_variants
-            search_query = ""
-            if body.search_id:
-                s = db.execute(text("SELECT keywords FROM searches WHERE id=:sid"), {"sid": body.search_id}).fetchone()
-                if s:
-                    search_query = s.keywords or ""
+            search_query = search_row.keywords or "" if search_row else ""
             variants = generate_search_variants(body.model_name, body.suggested_keywords, search_query)
             if variants:
                 db.execute(
@@ -144,8 +155,25 @@ def validate_clusters(body: ValidateClustersBody, db: Session = Depends(get_db))
             continue
 
         search_id = item.get("search_id") or body.search_id
-        suggested_keywords = sanitize_keywords(item.get("suggested_keywords", []))
-        if not suggested_keywords:
+        raw_keywords = item.get("suggested_keywords", [])
+
+        search_row = None
+        if search_id:
+            search_row = db.execute(
+                text("SELECT keywords, name, search_type FROM searches WHERE id=:sid"), {"sid": search_id}
+            ).fetchone()
+        brand_hint = (
+            search_row.name.strip().lower()
+            if search_row and search_row.search_type == "brand" and search_row.name
+            else None
+        )
+
+        # Limite à 2 mots (marque + mot le plus distinctif) — voir
+        # keywords.py::cap_keywords_for_matching pour le détail du bug corrigé
+        # (Gemini mélange souvent un mot distinctif avec des traductions/
+        # synonymes qui n'ont pas à coexister dans un même titre).
+        keywords_rules = cap_keywords_for_matching(raw_keywords, brand_hint=brand_hint)
+        if not keywords_rules:
             errors.append({
                 "model_name": model_name,
                 "reason": "mots-clés invalides : tous vides ou trop courts (minimum 2 caractères)",
@@ -173,7 +201,7 @@ def validate_clusters(body: ValidateClustersBody, db: Session = Depends(get_db))
                 ),
                 {
                     "name": model_name,
-                    "kw": json.dumps(suggested_keywords),
+                    "kw": json.dumps(keywords_rules),
                     "sid": search_id,
                 },
             ).fetchone()
@@ -183,12 +211,8 @@ def validate_clusters(body: ValidateClustersBody, db: Session = Depends(get_db))
             # Variantes de recherche
             try:
                 from ai_clustering import generate_search_variants
-                search_kw = ""
-                if search_id:
-                    s = db.execute(text("SELECT keywords FROM searches WHERE id=:sid"), {"sid": search_id}).fetchone()
-                    if s:
-                        search_kw = s.keywords or ""
-                variants = generate_search_variants(model_name, suggested_keywords, search_kw)
+                search_kw = search_row.keywords or "" if search_row else ""
+                variants = generate_search_variants(model_name, raw_keywords, search_kw)
                 if variants:
                     db.execute(
                         text("UPDATE product_models SET search_variants=CAST(:v AS jsonb) WHERE id=:mid"),

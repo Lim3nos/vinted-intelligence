@@ -99,6 +99,45 @@ def sanitize_keywords(keywords: list) -> list:
     return cleaned
 
 
+def cap_keywords_for_matching(keywords: list, brand_hint: Optional[str] = None, max_words: int = 2) -> list:
+    """
+    Réduit une liste de mots-clés suggérés (ex: par le clustering Gemini) à un
+    jeu minimal de `max_words` mots pour servir de base ET strict aux futurs
+    matchings (keywords_rules).
+
+    Cause du bug corrigé ici : Gemini propose souvent une liste qui mélange un
+    mot distinctif ET plusieurs traductions/synonymes de la même idée (ex:
+    ["carre","hermes","seta","echarpe"] — "seta"=soie en italien, "echarpe"
+    est un quasi-synonyme de "carre"). Si tous ces mots sont exigés ensemble
+    (ET strict), un titre normal n'en contient jamais qu'un ou deux à la fois
+    et le modèle ne matche presque plus rien. En limitant la base à 2 mots
+    (marque + le mot le plus distinctif), le modèle reste précis sans exiger
+    une coexistence irréaliste. Les mots écartés restent disponibles pour
+    generate_search_variants, qui les traite correctement comme des
+    alternatives (OU), pas comme des exigences supplémentaires (ET).
+    """
+    cleaned = sanitize_keywords(keywords)
+    if not cleaned:
+        return cleaned
+
+    # brand_hint peut être un nom de marque à plusieurs mots (ex: "isabel
+    # marant") — chercher si UN de ses mots apparaît dans les mots-clés
+    # suggérés, pas la phrase entière telle quelle.
+    brand_words = set(_words_from_phrase(brand_hint)) if brand_hint else set()
+
+    result = []
+    for kw in cleaned:
+        if kw in brand_words:
+            result.append(kw)
+            break
+    for kw in cleaned:
+        if len(result) >= max_words:
+            break
+        if kw not in result:
+            result.append(kw)
+    return result[:max_words]
+
+
 def _parse_json_list(raw) -> list:
     """Désérialise un champ JSONB qui peut arriver sous forme de string (psycopg2) ou déjà de liste."""
     if isinstance(raw, str):
