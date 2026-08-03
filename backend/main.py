@@ -290,16 +290,19 @@ def verify_sold_listings(
         for _ in range(max_batches if run_until_done else 1):
             _db = SessionLocal()
             try:
+                # IS NULL uniquement : le jamais-vérifié, pas le déjà-résolu à
+                # false — sinon la boucle reboucle indéfiniment sur les mêmes
+                # suppressions déjà confirmées sans jamais s'arrêter.
                 remaining = _db.execute(
                     text(
                         "SELECT COUNT(*) FROM listings "
-                        "WHERE is_sold = true AND sale_confirmed IS NOT TRUE"
+                        "WHERE is_sold = true AND sale_confirmed IS NULL"
                     )
                 ).scalar()
                 if remaining == 0:
-                    log_to_db("INFO", "api", "verify-sold : plus aucun candidat, arrêt de la boucle")
+                    log_to_db("INFO", "api", "verify-sold : retard jamais-vérifié épuisé, arrêt de la boucle")
                     return
-                _do_verify_sold(_db)
+                _do_verify_sold(_db, only_unverified=run_until_done)
             finally:
                 _db.close()
             if not run_until_done:
@@ -314,7 +317,7 @@ def verify_sold_listings(
     }
 
 
-def _do_verify_sold(db, limit: int = 400):
+def _do_verify_sold(db, limit: int = 400, only_unverified: bool = False):
     """
     Vérification effective des listings vendus via page HTML item — exécuté en background.
 
@@ -323,19 +326,26 @@ def _do_verify_sold(db, limit: int = 400):
     Fallback sur catalog vendeur si la page HTML échoue (timeout, 429).
 
     Sert aussi de rattrapage pour sale_confirmed (colonne ajoutée pour distinguer
-    une vraie vente d'une simple suppression) : traite en priorité tout listing
-    is_sold=true dont sale_confirmed n'a jamais été déterminé (IS NOT TRUE),
-    sans limite de date — jusqu'à `limit` par appel.
+    une vraie vente d'une simple suppression).
+
+    only_unverified=False (défaut) : traite is_sold=true dont sale_confirmed
+    n'a jamais été déterminé (IS NULL) OU déjà résolu à false (suppression
+    probable) — permet une double vérification manuelle ponctuelle.
+    only_unverified=True : ne traite QUE sale_confirmed IS NULL (jamais
+    vérifié) — utilisé par la boucle automatique (run_until_done) pour
+    qu'elle s'arrête une fois le vrai retard épuisé, au lieu de reboucler
+    indéfiniment sur des annonces déjà résolues à false.
     """
     import time, random
 
+    confirmed_filter = "sale_confirmed IS NULL" if only_unverified else "sale_confirmed IS NOT TRUE"
     candidates = db.execute(
         text(
-            """
+            f"""
             SELECT id, vinted_id, title, disappeared_at, seller_id
             FROM listings
             WHERE is_sold = true
-              AND sale_confirmed IS NOT TRUE
+              AND {confirmed_filter}
             ORDER BY disappeared_at DESC NULLS LAST
             LIMIT :limit
             """
