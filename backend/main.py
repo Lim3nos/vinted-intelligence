@@ -389,6 +389,7 @@ def _do_verify_sold(db, limit: int = 400):
                     ),
                     {"lid": listing.id},
                 )
+                db.commit()
                 reset_count += 1
             elif gone is True and confirmed:
                 # Vraie vente confirmée (is_closed=true ou can_be_sold=false)
@@ -396,6 +397,7 @@ def _do_verify_sold(db, limit: int = 400):
                     text("UPDATE listings SET sale_confirmed = true WHERE id = :lid"),
                     {"lid": listing.id},
                 )
+                db.commit()
                 confirmed_count += 1
             elif gone is True and not confirmed:
                 # Disparu (404 ou absent du catalogue vendeur) mais vente non
@@ -406,16 +408,16 @@ def _do_verify_sold(db, limit: int = 400):
                     text("UPDATE listings SET sale_confirmed = false WHERE id = :lid"),
                     {"lid": listing.id},
                 )
+                db.commit()
                 removed_unconfirmed_count += 1
             else:
                 # Vérification impossible (timeout, 429, parse error) → ne pas toucher
                 skipped_count += 1
 
         except Exception as e:
+            db.rollback()
             skipped_count += 1
             logger.warning("Erreur verify-sold item %d: %s", listing.vinted_id, e)
-
-    db.commit()
 
     result = {
         "checked": len(candidates),

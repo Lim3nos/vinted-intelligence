@@ -442,6 +442,7 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
                 {"now": now_utc, "life_h": life_hours, "lid": row.id,
                  "price": row.price, "confirmed": snap["sale_confirmed"]},
             )
+            db.commit()
             sold_confirmed += 1
         else:
             db.execute(
@@ -468,9 +469,8 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
                     ),
                     {"lid": row.id, "vid": row.vinted_id, "fav": snap["favourite_count"], "now": now_utc},
                 )
+            db.commit()
             refreshed += 1
-
-    db.commit()
 
     result = {"checked": len(stale), "refreshed": refreshed,
               "sold_confirmed": sold_confirmed, "failed": failed}
