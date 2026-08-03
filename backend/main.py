@@ -271,6 +271,12 @@ def get_logs(
 @app.post("/api/admin/verify-sold", status_code=202)
 def verify_sold_listings(
     background_tasks: BackgroundTasks,
+    run_until_done: bool = Query(
+        False,
+        description="Enchaîne les lots automatiquement jusqu'à épuisement du retard, "
+        "au lieu d'un seul lot de 400 — utile pour rattraper un gros retard sans "
+        "avoir à redéclencher manuellement après chaque lot.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
@@ -280,14 +286,32 @@ def verify_sold_listings(
     from database.connection import SessionLocal
 
     def _run_verify():
-        _db = SessionLocal()
-        try:
-            _do_verify_sold(_db)
-        finally:
-            _db.close()
+        max_batches = 60  # garde-fou large (jusqu'à 24 000 annonces)
+        for _ in range(max_batches if run_until_done else 1):
+            _db = SessionLocal()
+            try:
+                remaining = _db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM listings "
+                        "WHERE is_sold = true AND sale_confirmed IS NOT TRUE"
+                    )
+                ).scalar()
+                if remaining == 0:
+                    log_to_db("INFO", "api", "verify-sold : plus aucun candidat, arrêt de la boucle")
+                    return
+                _do_verify_sold(_db)
+            finally:
+                _db.close()
+            if not run_until_done:
+                return
+        log_to_db("WARNING", "api", "verify-sold : limite de lots atteinte, du retard peut subsister")
 
     background_tasks.add_task(_run_verify)
-    return {"status": "verify_started", "message": "Vérification en arrière-plan — résultat dans /api/logs"}
+    return {
+        "status": "verify_started",
+        "run_until_done": run_until_done,
+        "message": "Vérification en arrière-plan — résultat dans /api/logs",
+    }
 
 
 def _do_verify_sold(db, limit: int = 400):
