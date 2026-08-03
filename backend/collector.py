@@ -177,12 +177,38 @@ def _try_refresh_token(refresh_token: str) -> Tuple[Optional[str], Optional[int]
     return None, None
 
 
+def _extract_buyer_item_status_title(html: str) -> Optional[str]:
+    """
+    Extrait le titre du bloc `buyer_item_status` de la page item (ex: "Vendu").
+
+    Découvert le 03/08 : Vinted a changé la structure de sa page item — les
+    champs `is_closed`/`can_be_sold` sur lesquels reposait toute la détection
+    de vente ont disparu du HTML (confirmé : absents des annonces vendues ET
+    actives testées). Le nouveau signal fiable est ce bloc, entièrement
+    ABSENT sur une annonce active et présent avec `"title":"Vendu"` sur une
+    annonce vendue — vérifié empiriquement sur des annonces des deux états.
+
+    Retourne le titre (ex: "Vendu") si le bloc est présent, sinon None.
+    """
+    for pattern in (
+        r'"buyer_item_status".*?"title":"([^"]*)"',
+        r'\\"buyer_item_status\\".*?\\"title\\":\\"([^\\"]*)\\"',
+    ):
+        m = re.search(pattern, html)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _check_item_sold_via_html(vinted_id: int) -> tuple[Optional[bool], bool]:
     """
     Vérifie le statut vendu en scrapant la page HTML publique de l'item.
 
-    Vinted est un SPA React qui embarque l'état initial en JSON dans le HTML.
-    Le champ 'is_closed' (True=vendu) est accessible sans auth dans ce JSON.
+    Signal principal : bloc `buyer_item_status` (voir
+    _extract_buyer_item_status_title) — absent = actif, title="Vendu" =
+    vendu confirmé. Les anciens champs `is_closed`/`can_be_sold` sont gardés
+    en repli au cas où Vinted les réintroduirait, mais n'ont plus été
+    observés dans le HTML depuis le changement du 03/08.
     Fonctionne depuis Railway sans auth, sur tous les items publics.
 
     Une page 404 signifie que l'annonce a disparu, mais PAS qu'elle a été
@@ -217,9 +243,14 @@ def _check_item_sold_via_html(vinted_id: int) -> tuple[Optional[bool], bool]:
         if resp.status_code != 200:
             return None, False
 
-        # Extraire is_closed depuis le JSON embarqué dans le HTML.
-        # Vinted sérialise parfois en JSON échappé (\"is_closed\") dans les scripts,
-        # parfois en JSON brut ("is_closed") — les deux patterns doivent être testés.
+        # Signal principal : bloc buyer_item_status (voir
+        # _extract_buyer_item_status_title) — absent = actif, confirmé.
+        buyer_status = _extract_buyer_item_status_title(resp.text)
+        if buyer_status is not None:
+            return (buyer_status == "Vendu"), True
+
+        # Repli : anciens champs is_closed/can_be_sold, plus observés dans le
+        # HTML depuis le changement du 03/08 mais gardés au cas où.
         for pattern in (
             r'"is_closed"\s*:\s*(true|false)',       # JSON brut
             r'\\"is_closed\\"\s*:\s*(true|false)',   # JSON échappé dans attribut HTML
@@ -229,7 +260,6 @@ def _check_item_sold_via_html(vinted_id: int) -> tuple[Optional[bool], bool]:
             if m:
                 return (m.group(1) == "true"), True
 
-        # Fallback : chercher can_be_sold
         for pattern2 in (
             r'"can_be_sold"\s*:\s*(true|false)',
             r'\\"can_be_sold\\"\s*:\s*(true|false)',
@@ -240,8 +270,11 @@ def _check_item_sold_via_html(vinted_id: int) -> tuple[Optional[bool], bool]:
                 can_be_sold = m2.group(1) == "true"
                 return (not can_be_sold), True  # can_be_sold=false → vendu=True, confirmé
 
-        logger.debug("HTML item %s: is_closed non trouvé dans %d bytes", vinted_id, len(resp.text))
-        return None, False
+        # Ni buyer_item_status, ni is_closed/can_be_sold : page chargée
+        # normalement sans aucun signal de vente => annonce active, confirmé
+        # (vérifié empiriquement : ce bloc est toujours présent sur une
+        # annonce vendue et toujours absent sur une annonce active).
+        return False, True
 
     except Exception as e:
         logger.debug("Erreur HTML item check %s: %s", vinted_id, e)
@@ -305,16 +338,32 @@ def fetch_item_snapshot(vinted_id: int) -> Optional[dict]:
             return None
 
         html = resp.text
-        is_closed = None
-        for pattern in (r'"is_closed"\s*:\s*(true|false)', r'\\"is_closed\\"\s*:\s*(true|false)'):
-            m = re.search(pattern, html)
-            if m:
-                is_closed = m.group(1) == "true"
-                break
+
+        # Signal principal : bloc buyer_item_status (voir
+        # _extract_buyer_item_status_title) — absent = actif confirmé,
+        # présent avec title="Vendu" = vente confirmée. Remplace is_closed,
+        # disparu du HTML depuis le changement Vinted du 03/08.
+        buyer_status = _extract_buyer_item_status_title(html)
+        if buyer_status is not None:
+            is_closed = buyer_status == "Vendu"
+            sale_confirmed = is_closed
+        else:
+            # Repli : anciens champs, plus observés mais gardés au cas où.
+            is_closed = None
+            for pattern in (r'"is_closed"\s*:\s*(true|false)', r'\\"is_closed\\"\s*:\s*(true|false)'):
+                m = re.search(pattern, html)
+                if m:
+                    is_closed = m.group(1) == "true"
+                    break
+            if is_closed is None:
+                # Ni buyer_item_status ni is_closed : page normale sans signal
+                # de vente => active confirmée (vérifié empiriquement).
+                is_closed = False
+            sale_confirmed = is_closed is True
 
         return {
             "is_closed": is_closed,
-            "sale_confirmed": is_closed is True,
+            "sale_confirmed": sale_confirmed,
             "favourite_count": _extract_html_int_field(html, "favourite_count"),
             "status": _extract_html_str_field(html, "status"),
             "brand_title": _extract_html_str_field(html, "brand_title"),
