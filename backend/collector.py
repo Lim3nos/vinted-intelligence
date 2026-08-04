@@ -393,6 +393,11 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_after_hours)
 
+    # Priorité aux annonces qui accumulent des absences (probablement vendues/
+    # supprimées, donc les plus urgentes à confirmer), pas juste aux plus
+    # anciennes — sinon un pool de dizaines de milliers d'annonces "un peu
+    # vieilles mais normales" peut indéfiniment faire attendre les cas
+    # vraiment suspects derrière la limite de `limit` par cycle.
     stale = db.execute(
         text(
             """
@@ -400,7 +405,7 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
             FROM listings
             WHERE is_sold = false
               AND last_seen_at < :cutoff
-            ORDER BY last_seen_at ASC
+            ORDER BY consecutive_absences DESC, last_seen_at ASC
             LIMIT :limit
             """
         ),

@@ -240,22 +240,51 @@ def trigger_variant_snapshot(background_tasks: BackgroundTasks):
 
 
 @app.post("/api/admin/refresh-stale-listings", status_code=202)
-def trigger_stale_refresh(background_tasks: BackgroundTasks, limit: int = Query(100, le=500)):
+def trigger_stale_refresh(
+    background_tasks: BackgroundTasks,
+    limit: int = Query(100, le=500),
+    run_until_done: bool = Query(
+        False,
+        description="Enchaîne les lots (priorité aux annonces avec le plus "
+        "d'absences consécutives) jusqu'à épuisement du retard suspect, "
+        "au lieu d'un seul lot.",
+    ),
+):
     """
     Revisite immédiatement (page détail Vinted) les annonces actives (suivies
     ou non) qui n'ont pas été revues depuis plus de 2h — cas des annonces
     poussées hors de la fenêtre du scan principal sur une marque à fort volume
     (voir collector.py::refresh_stale_listings). Normalement automatique
     toutes les 20 min ; ce endpoint permet de forcer sans attendre, ou de
-    lancer un gros rattrapage ponctuel (limit jusqu'à 500).
+    lancer un gros rattrapage ponctuel (limit jusqu'à 500, ou en boucle avec
+    run_until_done).
     """
     def _run():
         from database.connection import SessionLocal
         from scheduler import run_stale_refresh
-        run_stale_refresh(SessionLocal, limit=limit)
+
+        max_batches = 60  # garde-fou large
+        for _ in range(max_batches if run_until_done else 1):
+            db = SessionLocal()
+            try:
+                remaining = db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM listings "
+                        "WHERE is_sold = false AND consecutive_absences >= 4"
+                    )
+                ).scalar()
+            finally:
+                db.close()
+            if remaining == 0:
+                log_to_db("INFO", "api", "refresh-stale-listings : retard suspect épuisé, arrêt de la boucle")
+                return
+            run_stale_refresh(SessionLocal, limit=limit)
+            if not run_until_done:
+                return
+        log_to_db("WARNING", "api", "refresh-stale-listings : limite de lots atteinte, du retard peut subsister")
 
     background_tasks.add_task(_run)
-    return {"status": "stale_refresh_started", "limit": limit}
+    return {"status": "stale_refresh_started", "limit": limit, "run_until_done": run_until_done}
 
 
 @app.get("/api/logs")
