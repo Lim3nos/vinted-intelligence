@@ -269,8 +269,14 @@ def trigger_stale_refresh(
             try:
                 remaining = db.execute(
                     text(
-                        "SELECT COUNT(*) FROM listings "
-                        "WHERE is_sold = false AND consecutive_absences >= 4"
+                        """
+                        SELECT COUNT(*) FROM listings
+                        WHERE is_sold = false
+                          AND (
+                            consecutive_absences >= 4
+                            OR (first_seen_at = last_seen_at AND last_seen_at < NOW() - INTERVAL '12 hours')
+                          )
+                        """
                     )
                 ).scalar()
             finally:

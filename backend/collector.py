@@ -393,11 +393,19 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_after_hours)
 
-    # Priorité aux annonces qui accumulent des absences (probablement vendues/
-    # supprimées, donc les plus urgentes à confirmer), pas juste aux plus
-    # anciennes — sinon un pool de dizaines de milliers d'annonces "un peu
-    # vieilles mais normales" peut indéfiniment faire attendre les cas
-    # vraiment suspects derrière la limite de `limit` par cycle.
+    # Priorité 1 : annonces vues une seule fois (first_seen_at = last_seen_at)
+    # et jamais revues depuis 12h+. La règle anti-faux-positifs du scan
+    # principal (il faut 2 snapshots distincts avant de compter une absence,
+    # voir run_snapshot) protège les annonces tout juste publiées — mais si
+    # l'annonce est vendue avant le 2e passage, elle ne revoit JAMAIS de 2e
+    # snapshot et reste bloquée à consecutive_absences=0 pour toujours,
+    # invisible pour la détection de disparition. Or une vente si rapide
+    # qu'elle échappe même au scan suivant est justement le signal le plus
+    # fort que cet outil cherche à capter — priorité absolue ici.
+    # Priorité 2 : annonces qui accumulent des absences (probablement
+    # vendues/supprimées), pas juste les plus anciennes — sinon un pool de
+    # dizaines de milliers d'annonces "un peu vieilles mais normales" peut
+    # indéfiniment faire attendre les cas vraiment suspects.
     stale = db.execute(
         text(
             """
@@ -405,7 +413,10 @@ def refresh_stale_listings(db: Session, limit: int = 100, stale_after_hours: int
             FROM listings
             WHERE is_sold = false
               AND last_seen_at < :cutoff
-            ORDER BY consecutive_absences DESC, last_seen_at ASC
+            ORDER BY
+                (first_seen_at = last_seen_at AND last_seen_at < NOW() - INTERVAL '12 hours') DESC,
+                consecutive_absences DESC,
+                last_seen_at ASC
             LIMIT :limit
             """
         ),
