@@ -1216,12 +1216,27 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
 
                 else:
                     # e. Annonce existante active : mettre à jour last_seen_at + snapshot favoris
+                    #
+                    # Si l'annonce était marquée is_sold=true (typiquement une détection par
+                    # absence non confirmée, voir plus bas dans cette fonction) et qu'elle
+                    # réapparaît ici dans un scan, c'est que la vente/disparition était en fait
+                    # un faux positif (annonce simplement repoussée hors de la fenêtre de scan,
+                    # voir _compute_price_brackets) : on la "réactive" en réinitialisant is_sold
+                    # et les champs de vente. Sans ce reset, une annonce qui redevient visible ne
+                    # sort jamais de l'état vendu — elle continue de recevoir des mises à jour de
+                    # last_seen_at ci-dessous tout en restant invisible dans le tableau d'analyse
+                    # (constaté en prod sur des annonces encore en ligne marquées "Supprimé").
                     db.execute(
                         text(
                             """
                             UPDATE listings
                             SET last_seen_at = :now,
                                 consecutive_absences = 0,
+                                is_sold = false,
+                                disappeared_at = NULL,
+                                sale_confirmed = NULL,
+                                final_price = NULL,
+                                time_to_disappear_hours = NULL,
                                 product_model_id = COALESCE(product_model_id, :model_id),
                                 brand = COALESCE(brand, :brand),
                                 item_status = COALESCE(item_status, :item_status),
