@@ -1266,6 +1266,16 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
                     updated_count += 1
 
         except Exception as e:
+            # Sans rollback ici, une seule erreur sur un item "casse" la
+            # transaction Postgres pour le reste du batch entier : chaque item
+            # suivant echoue alors en cascade silencieusement (transaction
+            # abandonnee, "current transaction is aborted") jusqu'au commit
+            # final, qui ne sauve plus rien du tout. Le rollback limite les
+            # degats aux items deja traites AVANT celui en erreur dans cette
+            # meme transaction (perdus, puisque jamais commit) — mais permet
+            # aux items suivants de continuer a s'enregistrer normalement,
+            # au lieu de tous echouer aussi.
+            db.rollback()
             logger.error("Erreur traitement annonce %s: %s", item.get("id"), e)
             continue
 

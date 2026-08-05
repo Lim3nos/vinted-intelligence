@@ -249,6 +249,7 @@ def recalculate_scores_for_search(search_id: int, db: Session) -> int:
             calculate_signal_score(m.id, db)
             count += 1
         except Exception as e:
+            db.rollback()  # évite qu'une erreur ne casse la transaction pour les modèles suivants
             log_to_db(
                 "WARNING", "analyzer",
                 f"Erreur recalcul score modèle #{m.id}: {e}",
@@ -273,6 +274,7 @@ def recalculate_all_scores(db: Session) -> int:
             calculate_signal_score(m.id, db)
             count += 1
         except Exception as e:
+            db.rollback()  # évite qu'une erreur ne casse la transaction pour les modèles suivants
             log_to_db(
                 "WARNING", "analyzer",
                 f"Erreur recalcul score modèle #{m.id}: {e}",

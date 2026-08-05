@@ -23,6 +23,18 @@ engine = create_engine(
     pool_pre_ping=True,        # vérifie la connexion avant usage
     pool_recycle=1800,         # recycle les connexions après 30 min
     echo=False,
+    connect_args={
+        # Sans ces timeouts, une coupure réseau silencieuse entre Railway et
+        # Supabase pendant une transaction ouverte laisse le thread Python
+        # bloqué indéfiniment (aucune erreur, aucun retry) — observé en prod :
+        # une session "idle in transaction" restée bloquée 7+ minutes en plein
+        # milieu d'un scan, tenant potentiellement des verrous tout ce temps.
+        "options": "-c statement_timeout=120000",  # 2 min max par requête (le pire cas observé, migration de démarrage, prenait 91s)
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    },
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

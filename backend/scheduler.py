@@ -205,6 +205,12 @@ def run_variant_snapshots(db_session_factory):
                                 )
                             total_new += 1
                     except Exception:
+                        # Sans rollback, une seule erreur casse la transaction
+                        # pour tout le reste du cycle (tous les items suivants
+                        # echouent alors en cascade jusqu'au commit final, qui
+                        # ne sauve plus rien) -- voir le meme correctif dans
+                        # collector.py::run_snapshot.
+                        db.rollback()
                         continue
 
             db.commit()
