@@ -7,6 +7,7 @@ Gère la collecte des annonces, la déduplication, la détection de disparitions
 import os
 import re
 import time
+import math
 import random
 import logging
 import unicodedata
@@ -808,6 +809,62 @@ def csv_to_list(csv_value: Optional[str]) -> list:
     return [v.strip() for v in csv_value.split(",") if v.strip()]
 
 
+def _compute_price_brackets(
+    db: Session, search_id: int, price_min: float, price_max: float,
+    active_count: int, target_per_bracket: int = 900,
+) -> list[tuple[float, float]]:
+    """
+    Découpe [price_min, price_max] en tranches de prix pour multiplier la
+    couverture du scan catalogue sur les grosses marques.
+
+    Vinted plafonne dur à 10 pages de 96 résultats (960 annonces max
+    visibles par requête, triée du plus récent au plus ancien) — au-delà,
+    les annonces actives les plus anciennes sortent structurellement de la
+    fenêtre scannée à chaque cycle, sans jamais y revenir (repoussées par le
+    flux de nouvelles annonces), et accumulent des "absences" à tort alors
+    qu'elles n'ont pas disparu de Vinted. Scanner par tranche de prix donne
+    à chaque tranche sa propre fenêtre de 960, ce qui multiplie la
+    couverture totale.
+
+    Le nombre de tranches s'adapte au volume actuel (`active_count`). Les
+    bornes sont calculées par quantiles sur les prix déjà observés pour
+    cette recherche plutôt que des intervalles de prix égaux, pour équilibrer
+    le nombre d'annonces par tranche (la distribution de prix réelle est très
+    inégale — beaucoup plus d'annonces en dessous de 150€ qu'au-dessus).
+    """
+    n_brackets = max(1, math.ceil(active_count / target_per_bracket))
+    if n_brackets <= 1:
+        return [(price_min, price_max)]
+
+    quantile_points = [i / n_brackets for i in range(1, n_brackets)]
+    row = db.execute(
+        text(
+            """
+            SELECT percentile_cont(:qs) WITHIN GROUP (ORDER BY price) AS qs
+            FROM listings
+            WHERE search_id = :sid AND price IS NOT NULL AND is_sold = false
+            """
+        ),
+        {"qs": quantile_points, "sid": search_id},
+    ).fetchone()
+
+    boundaries = [float(q) for q in (row.qs or []) if q is not None]
+    if not boundaries:
+        # Pas assez de données de prix — repli sur des tranches de largeur égale
+        step = (price_max - price_min) / n_brackets
+        boundaries = [price_min + step * i for i in range(1, n_brackets)]
+
+    brackets = []
+    prev = price_min
+    for b in boundaries:
+        b = round(b, 2)
+        if b > prev:
+            brackets.append((prev, b))
+            prev = b
+    brackets.append((prev, price_max))
+    return brackets
+
+
 # ---------------------------------------------------------------------------
 # Snapshot complet
 # ---------------------------------------------------------------------------
@@ -889,10 +946,6 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
         scraper_params["brand_ids[]"] = csv_to_list(search.brand_ids)
     if search.catalog_ids:
         scraper_params["catalog_ids[]"] = csv_to_list(search.catalog_ids)
-    if search.price_min is not None:
-        scraper_params["price_from"] = search.price_min
-    if search.price_max is not None:
-        scraper_params["price_to"] = search.price_max
 
     # Paramètres extra issus d'une URL Vinted (status_ids, size_ids, color_ids, etc.)
     # — mêmes filtres array, même format [] requis.
@@ -912,14 +965,54 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
 
     # max_pages=10 : Vinted refuse toute page au-delà (HTTP 400 "Page offset is
     # invalid" confirmé empiriquement à page=11, quel que soit price/brand) —
-    # plafond dur côté API, pas une limite de notre pagination. Aller plus loin
-    # ne fait que gaspiller une requête (+ délai anti-blocage) à chaque cycle
-    # pour un échec garanti ; safe_request_paginated s'arrête proprement dessus
-    # de toute façon, mais autant ne pas la déclencher.
-    items = safe_request_paginated(scraper_params, max_pages=10)
+    # plafond dur côté API, pas une limite de notre pagination (960 annonces
+    # max par requête). Au-delà de ce volume d'annonces actives, on découpe
+    # la recherche en plusieurs tranches de prix pour multiplier la
+    # couverture — voir _compute_price_brackets.
+    price_min = float(search.price_min) if search.price_min is not None else 0.0
+    price_max = float(search.price_max) if search.price_max is not None else 99999.0
+    active_count = db.execute(
+        text("SELECT COUNT(*) FROM listings WHERE search_id = :sid AND is_sold = false"),
+        {"sid": search_id},
+    ).scalar()
+    brackets = _compute_price_brackets(db, search_id, price_min, price_max, active_count)
+
+    items: list = []
+    seen_ids: set = set()
+    any_bracket_succeeded = False
+    for i, (lo, hi) in enumerate(brackets):
+        bracket_params = dict(scraper_params)
+        bracket_params["price_from"] = lo
+        bracket_params["price_to"] = hi
+        bracket_items = safe_request_paginated(bracket_params, max_pages=10)
+        if bracket_items is None:
+            log_to_db(
+                "WARNING", "collector",
+                f"Snapshot #{search_id} — tranche prix {lo}-{hi} échouée",
+                {"search_id": search_id, "price_from": lo, "price_to": hi},
+            )
+            continue
+        any_bracket_succeeded = True
+        for it in bracket_items:
+            vid = it.get("id")
+            if vid is not None and vid not in seen_ids:
+                seen_ids.add(vid)
+                items.append(it)
+        if i < len(brackets) - 1:
+            time.sleep(random.uniform(1.0, 2.0))  # pause entre tranches, anti-blocage
+
+    if len(brackets) > 1:
+        log_to_db(
+            "INFO", "collector",
+            f"Snapshot #{search_id} — {len(brackets)} tranches de prix scannées, "
+            f"{len(items)} annonces uniques au total",
+            {"search_id": search_id, "n_brackets": len(brackets), "total_items": len(items)},
+        )
 
     # 3. Erreur réseau → abandonner sans toucher aux données existantes
-    if items is None:
+    # (seulement si TOUTES les tranches ont échoué — une tranche isolée en
+    # échec ne doit pas annuler les données récupérées sur les autres)
+    if not any_bracket_succeeded:
         log_to_db(
             "ERROR", "collector",
             f"Snapshot #{search_id} abandonné — échec réseau",
