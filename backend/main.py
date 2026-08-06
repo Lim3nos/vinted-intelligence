@@ -38,6 +38,19 @@ async def lifespan(app: FastAPI):
     # Migrations : s'assurer que les colonnes récentes existent
     from database.connection import SessionLocal as _SL
     _db_mig = _SL()
+    # lock_timeout court : un ALTER TABLE IF NOT EXISTS a besoin d'un verrou
+    # exclusif même quand il ne change rien (la colonne existe déjà), et ce
+    # verrou attend la fin de toute transaction ayant touché la table —
+    # y compris un run_snapshot en cours, qui garde la sienne ouverte tout le
+    # temps du scan (désormais plusieurs minutes à heures avec le découpage
+    # par tranches de prix, voir collector.py::_compute_price_brackets).
+    # Sans ce timeout, une migration attend indéfiniment, le healthcheck
+    # Railway (5 min) expire en premier, et le déploiement entier échoue —
+    # observé en prod le 06/08 (deux échecs de suite). Ces migrations sont
+    # idempotentes : les sauter un cycle ne perd rien, le prochain redémarrage
+    # réessaiera.
+    _db_mig.execute(text("SET lock_timeout = '5s'"))
+    _db_mig.commit()  # sans ce commit, un rollback() sur la 1ere migration annulerait aussi ce SET (transactionnel)
     # Chaque migration dans son propre try/except pour isolation
     for migration_sql in [
         "ALTER TABLE product_models ADD COLUMN IF NOT EXISTS search_variants JSONB DEFAULT '[]'::jsonb",
