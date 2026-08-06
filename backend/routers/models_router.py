@@ -146,7 +146,7 @@ def delete_model(model_id: int, db: Session = Depends(get_db)):
 def get_model_listings(
     model_id: int,
     page: int = Query(1, ge=1),
-    per_page: int = Query(50, le=50),
+    per_page: int = Query(50, le=500),
     db: Session = Depends(get_db),
 ):
     offset = (page - 1) * per_page

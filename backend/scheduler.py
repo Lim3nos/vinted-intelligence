@@ -293,38 +293,55 @@ def setup_scheduler(db_session_factory):
             searches = db.execute(
                 text("SELECT id, name FROM searches WHERE is_active = true")
             ).fetchall()
-
-            if not searches:
-                log_to_db("INFO", "scheduler", "Aucune recherche active — snapshot ignoré")
-                return
-
-            # Varier l'ordre pour éviter les patterns détectables
-            shuffled = list(searches)
-            random.shuffle(shuffled)
-
-            log_to_db(
-                "INFO", "scheduler",
-                f"Cycle de snapshot démarré — {len(shuffled)} recherche(s)",
-                {"count": len(shuffled)},
-            )
-
-            for s in shuffled:
-                db2 = db_session_factory()
-                try:
-                    asyncio.run(run_snapshot(s.id, db2))
-                except Exception as e:
-                    log_to_db(
-                        "ERROR", "scheduler",
-                        f"Snapshot #{s.id} '{s.name}' échoué: {e}",
-                        {"search_id": s.id},
-                    )
-                finally:
-                    db2.close()
-
         except Exception as e:
             log_to_db("ERROR", "scheduler", f"Erreur job_main_snapshots: {e}")
+            return
         finally:
+            # Fermée immédiatement après lecture, PAS à la toute fin du cycle.
+            #
+            # Cause du bug corrigé ici : cette session (autocommit=False, donc
+            # une transaction implicite s'ouvre dès la première requête) ne
+            # servait plus à rien après ces deux lectures, mais restait
+            # ouverte ("idle in transaction") jusqu'au `finally` global, soit
+            # pendant TOUT le cycle de scan des recherches actives ci-dessous
+            # — désormais plusieurs heures avec le découpage par tranches de
+            # prix (voir collector.py::_compute_price_brackets). Une
+            # transaction ouverte aussi longtemps, même inactive, bloque tout
+            # ALTER TABLE d'un futur déploiement qui a besoin d'un verrou
+            # exclusif sur `searches` (Postgres attend que toute transaction
+            # ayant touché la table se termine, y compris une idle-in-
+            # transaction qui ne fait plus rien). Observé en prod le 06/08 :
+            # une session idle in transaction depuis 3h48 a fait échouer le
+            # déploiement suivant (healthcheck jamais atteint, migrations
+            # bloquées en attente du verrou).
             db.close()
+
+        if not searches:
+            log_to_db("INFO", "scheduler", "Aucune recherche active — snapshot ignoré")
+            return
+
+        # Varier l'ordre pour éviter les patterns détectables
+        shuffled = list(searches)
+        random.shuffle(shuffled)
+
+        log_to_db(
+            "INFO", "scheduler",
+            f"Cycle de snapshot démarré — {len(shuffled)} recherche(s)",
+            {"count": len(shuffled)},
+        )
+
+        for s in shuffled:
+            db2 = db_session_factory()
+            try:
+                asyncio.run(run_snapshot(s.id, db2))
+            except Exception as e:
+                log_to_db(
+                    "ERROR", "scheduler",
+                    f"Snapshot #{s.id} '{s.name}' échoué: {e}",
+                    {"search_id": s.id},
+                )
+            finally:
+                db2.close()
 
     # -----------------------------------------------------------------------
     # Job 2 — Recalcul des scores
