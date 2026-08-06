@@ -1,11 +1,12 @@
 """Router CRUD pour les recherches surveillées."""
 
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -122,16 +123,15 @@ def resume_search(search_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{search_id}/snapshot", status_code=202)
-def manual_snapshot(search_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def manual_snapshot(search_id: int, request: Request, db: Session = Depends(get_db)):
     """
-    Déclenche un snapshot manuel immédiat, exécuté dans un thread séparé.
+    Déclenche un snapshot manuel immédiat.
 
-    IMPORTANT : la tâche de fond doit être une fonction SYNCHRONE (pas async def).
-    Starlette exécute les BackgroundTasks async directement sur la boucle événementielle
-    principale — si run_snapshot() bloque (time.sleep() dans safe_request), ça gèle
-    TOUTE l'API (plus aucune requête servie, y compris le healthcheck Railway) pendant
-    toute la durée du scraping. Une fonction sync est dispatchée dans un threadpool
-    séparé par Starlette, ce qui n'affecte pas le reste de l'API.
+    Soumis à l'exécuteur mono-thread d'APScheduler (voir main.py::_run_on_scheduler)
+    plutôt qu'à FastAPI BackgroundTasks, qui tournerait sur un thread totalement
+    indépendant du cycle de snapshot programmé — les deux écrivant sur `listings`
+    en parallèle, avec le même risque de verrous/timeouts que celui corrigé pour
+    refresh-stale-listings/verify-sold/variant-snapshot (voir _run_on_scheduler).
     """
     search = db.execute(text("SELECT id FROM searches WHERE id=:sid"), {"sid": search_id}).fetchone()
     if not search:
@@ -146,7 +146,13 @@ def manual_snapshot(search_id: int, background_tasks: BackgroundTasks, db: Sessi
         finally:
             db2.close()
 
-    background_tasks.add_task(_run)
+    scheduler = request.app.state.scheduler
+    scheduler.add_job(
+        _run,
+        trigger="date",
+        id=f"manual-snapshot-{search_id}-{uuid.uuid4().hex[:8]}",
+        misfire_grace_time=3600,
+    )
     return {"status": "snapshot_started", "search_id": search_id}
 
 

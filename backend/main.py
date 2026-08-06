@@ -4,11 +4,12 @@ Lance le scheduler APScheduler au démarrage.
 """
 
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import logging
-from fastapi import FastAPI, Depends, Query, BackgroundTasks
+from fastapi import FastAPI, Depends, Query, Request
 
 logger = logging.getLogger("vinted.main")
 from fastapi.middleware.cors import CORSMiddleware
@@ -117,6 +118,7 @@ async def lifespan(app: FastAPI):
     from database.connection import SessionLocal
     scheduler = setup_scheduler(SessionLocal)
     scheduler.start()
+    app.state.scheduler = scheduler
     log_to_db("INFO", "scheduler", "APScheduler démarré")
 
     yield
@@ -220,28 +222,59 @@ def get_health_logs(
     return _get_logs(level, limit, db)
 
 
+def _run_on_scheduler(request: Request, func, job_prefix: str):
+    """
+    Soumet une fonction de fond à l'exécuteur mono-thread d'APScheduler (voir
+    scheduler.py::setup_scheduler) au lieu de FastAPI BackgroundTasks.
+
+    Cause du bug corrigé ici : les endpoints admin (snapshot manuel,
+    refresh-stale-listings, verify-sold, variant-snapshot) utilisaient
+    BackgroundTasks, qui tourne dans un thread totalement indépendant de
+    l'exécuteur mono-thread d'APScheduler. Ce dernier a pourtant été rendu
+    mono-thread précisément pour empêcher deux jobs d'écrire en même temps sur
+    `listings` (deadlock observé en prod entre main_snapshots et
+    stale_refresh — voir commentaire dans setup_scheduler). Un déclenchement
+    manuel via BackgroundTasks contournait entièrement cette protection :
+    observé en prod le 05/08, un refresh-stale-listings?run_until_done=true
+    tournant ~2h en parallèle du cycle de snapshot programmé (lui-même
+    allongé par le découpage en tranches de prix) a fait échouer des dizaines
+    de mises à jour avec "canceling statement due to statement timeout",
+    empêchant la vérification de rattrapage de faire son travail. Passer par
+    le même exécuteur garantit qu'un seul de ces jobs — programmé ou manuel —
+    touche `listings` à la fois.
+    """
+    scheduler = request.app.state.scheduler
+    scheduler.add_job(
+        func,
+        trigger="date",
+        id=f"{job_prefix}-{uuid.uuid4().hex[:8]}",
+        misfire_grace_time=3600,
+    )
+
+
 @app.post("/api/admin/variant-snapshot", status_code=202)
-def trigger_variant_snapshot(background_tasks: BackgroundTasks):
+def trigger_variant_snapshot(request: Request):
     """
     Déclenche immédiatement le job "variantes" (normalement toutes les 6h) en
     arrière-plan — permet de forcer le backfill brand/état/photo/favoris sur
     les anciennes annonces sans attendre le prochain cycle programmé.
 
-    Fonction de fond SYNCHRONE (voir manual_snapshot pour l'explication) :
-    Starlette la dispatche dans un threadpool séparé, sans geler l'API.
+    Soumis à l'exécuteur mono-thread d'APScheduler (voir _run_on_scheduler)
+    plutôt qu'à BackgroundTasks, pour rester sérialisé avec les autres jobs
+    qui écrivent sur `listings`.
     """
     def _run():
         from database.connection import SessionLocal
         from scheduler import run_variant_snapshots
         run_variant_snapshots(SessionLocal)
 
-    background_tasks.add_task(_run)
+    _run_on_scheduler(request, _run, "variant-snapshot")
     return {"status": "variant_snapshot_started"}
 
 
 @app.post("/api/admin/refresh-stale-listings", status_code=202)
 def trigger_stale_refresh(
-    background_tasks: BackgroundTasks,
+    request: Request,
     limit: int = Query(100, le=500),
     run_until_done: bool = Query(
         False,
@@ -289,7 +322,7 @@ def trigger_stale_refresh(
                 return
         log_to_db("WARNING", "api", "refresh-stale-listings : limite de lots atteinte, du retard peut subsister")
 
-    background_tasks.add_task(_run)
+    _run_on_scheduler(request, _run, "stale-refresh")
     return {"status": "stale_refresh_started", "limit": limit, "run_until_done": run_until_done}
 
 
@@ -305,7 +338,7 @@ def get_logs(
 
 @app.post("/api/admin/verify-sold", status_code=202)
 def verify_sold_listings(
-    background_tasks: BackgroundTasks,
+    request: Request,
     run_until_done: bool = Query(
         False,
         description="Enchaîne les lots automatiquement jusqu'à épuisement du retard, "
@@ -344,7 +377,7 @@ def verify_sold_listings(
                 return
         log_to_db("WARNING", "api", "verify-sold : limite de lots atteinte, du retard peut subsister")
 
-    background_tasks.add_task(_run_verify)
+    _run_on_scheduler(request, _run_verify, "verify-sold")
     return {
         "status": "verify_started",
         "run_until_done": run_until_done,

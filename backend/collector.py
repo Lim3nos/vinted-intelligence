@@ -865,6 +865,57 @@ def _compute_price_brackets(
     return brackets
 
 
+_BRACKET_SATURATION_THRESHOLD = 900  # même valeur que target_per_bracket ci-dessus
+
+
+def _fetch_bracket_recursive(
+    scraper_params: dict, lo: float, hi: float, split_budget: dict,
+    depth: int = 0, max_depth: int = 3,
+) -> Optional[list]:
+    """
+    Récupère une tranche de prix (voir _compute_price_brackets), et la
+    redécoupe en deux récursivement si elle sature (quasi) le plafond de 960
+    résultats Vinted par requête.
+
+    _compute_price_brackets dimensionne le nombre de tranches à partir
+    d'`active_count` compté EN BASE — mais ce compteur peut lui-même être
+    sous-estimé (ex: de vraies annonces actives poussées à tort en "vendu"
+    par le bug d'absence sur fenêtre insuffisante, précisément le problème que
+    ce découpage cherche à éviter). Dans ce cas le découpage initial est trop
+    grossier et une tranche continue de saturer, perdant sa partie la plus
+    ancienne exactement comme avant le découpage. Ce raffinement adaptatif le
+    détecte (résultat proche du plafond) et redécoupe cette tranche précise en
+    deux, sans dépendre du comptage local.
+
+    `split_budget` : compteur partagé {"remaining": N} limitant le nombre
+    total de sous-requêtes additionnelles sur tout le snapshot (toutes
+    tranches confondues), pour borner le coût réseau anti rate-limit Vinted
+    même sur une recherche pathologiquement volumineuse.
+    """
+    bracket_params = dict(scraper_params)
+    bracket_params["price_from"] = lo
+    bracket_params["price_to"] = hi
+    result = safe_request_paginated(bracket_params, max_pages=10)
+    if result is None:
+        return None
+
+    mid = round((lo + hi) / 2, 2)
+    if (
+        len(result) >= _BRACKET_SATURATION_THRESHOLD
+        and depth < max_depth
+        and split_budget["remaining"] > 0
+        and lo < mid < hi
+    ):
+        split_budget["remaining"] -= 1
+        time.sleep(random.uniform(1.0, 2.0))
+        left = _fetch_bracket_recursive(scraper_params, lo, mid, split_budget, depth + 1, max_depth)
+        right = _fetch_bracket_recursive(scraper_params, mid, hi, split_budget, depth + 1, max_depth)
+        if left is not None or right is not None:
+            return (left or []) + (right or [])
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Snapshot complet
 # ---------------------------------------------------------------------------
@@ -980,11 +1031,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     items: list = []
     seen_ids: set = set()
     any_bracket_succeeded = False
+    # Budget partagé de sous-requêtes pour le redécoupage adaptatif (voir
+    # _fetch_bracket_recursive) — 2 par tranche initiale, plafonné à 12 pour
+    # borner le coût réseau même sur une recherche à volume très déséquilibré.
+    split_budget = {"remaining": min(12, len(brackets) * 2)}
     for i, (lo, hi) in enumerate(brackets):
-        bracket_params = dict(scraper_params)
-        bracket_params["price_from"] = lo
-        bracket_params["price_to"] = hi
-        bracket_items = safe_request_paginated(bracket_params, max_pages=10)
+        bracket_items = _fetch_bracket_recursive(scraper_params, lo, hi, split_budget)
         if bracket_items is None:
             log_to_db(
                 "WARNING", "collector",
@@ -1004,9 +1056,11 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     if len(brackets) > 1:
         log_to_db(
             "INFO", "collector",
-            f"Snapshot #{search_id} — {len(brackets)} tranches de prix scannées, "
+            f"Snapshot #{search_id} — {len(brackets)} tranches de prix scannées "
+            f"(+{min(12, len(brackets) * 2) - split_budget['remaining']} redécoupage(s) adaptatif(s)), "
             f"{len(items)} annonces uniques au total",
-            {"search_id": search_id, "n_brackets": len(brackets), "total_items": len(items)},
+            {"search_id": search_id, "n_brackets": len(brackets), "total_items": len(items),
+             "adaptive_splits_used": min(12, len(brackets) * 2) - split_budget["remaining"]},
         )
 
     # 3. Erreur réseau → abandonner sans toucher aux données existantes
