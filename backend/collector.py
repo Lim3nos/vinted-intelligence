@@ -1361,6 +1361,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     # snapshot ou le précédent seront vérifiés au prochain cycle — évite les faux
     # positifs sur les recherches larges (marque entière) où on ne peut scraper
     # qu'une fraction du catalogue Vinted.
+    #
+    # Tri par consecutive_absences DESC, last_seen_at ASC : avec le seuil de
+    # vérification abaissé à 1 absence (voir plus bas), beaucoup plus d'items
+    # deviennent éligibles à une vérification HTML par cycle que le budget
+    # (verify_budget) n'en permet — ce tri fait que les slots limités vont en
+    # priorité aux items déjà suspects plutôt qu'à un ordre arbitraire.
     disappeared_count = 0
     active_in_db = db.execute(
         text(
@@ -1370,96 +1376,125 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
             WHERE search_id = :sid
               AND is_sold = false
               AND last_seen_at > first_seen_at
+            ORDER BY consecutive_absences DESC, last_seen_at ASC
             """
         ),
         {"sid": search_id},
     ).fetchall()
 
+    # Incrémente consecutive_absences pour TOUS les items manquants en un seul
+    # aller-retour DB, au lieu d'un UPDATE individuel par item dans la boucle
+    # ci-dessous. Sur une grosse recherche (Hermès, Isabel Marant...) avec des
+    # milliers d'annonces actives, plusieurs centaines peuvent manquer d'une
+    # passe de scan à l'autre (couverture de tranche encore imparfaite) — les
+    # incrémenter un par un ajoutait potentiellement des centaines
+    # d'allers-retours réseau séquentiels vers Postgres à chaque cycle,
+    # allongeant d'autant la transaction (et donc le risque de verrou) sans
+    # bénéfice : seul verify_budget limite le vrai coût (les vérifications
+    # HTML), pas cette étape de comptage.
+    missing_rows = [row for row in active_in_db if row.vinted_id not in scraped_vinted_ids]
+    absences_by_id: dict = {}
+    if missing_rows:
+        missing_ids = [row.id for row in missing_rows]
+        for r in db.execute(
+            text(
+                """
+                UPDATE listings
+                SET consecutive_absences = consecutive_absences + 1
+                WHERE id = ANY(:ids)
+                RETURNING id, consecutive_absences
+                """
+            ),
+            {"ids": missing_ids},
+        ):
+            absences_by_id[r.id] = r.consecutive_absences
+
     verify_budget = 12  # max vérifications catalog par snapshot (anti rate-limit)
     has_auth_token = bool(_get_auth_token(db))  # check une seule fois
-    for row in active_in_db:
-        if row.vinted_id not in scraped_vinted_ids:
-            updated = db.execute(
+    for row in missing_rows:
+        new_absences = absences_by_id.get(row.id)
+        if new_absences is None:
+            continue  # l'UPDATE en lot n'a pas touché cette ligne (cas improbable, sécurité)
+
+        # Seuil de 1 absence (abaissé depuis 4) : sans danger, car le check HTML
+        # ci-dessous est le juge de paix — un item réellement encore actif
+        # (juste raté par cette passe de scan, ex. couverture de tranche
+        # imparfaite) se voit remettre consecutive_absences à 0 et repart
+        # comme si de rien n'était. Ne coûte pas plus de requêtes réseau non
+        # plus : verify_budget reste le vrai plafond (12/recherche/cycle) —
+        # abaisser le seuil élargit juste le vivier de candidats parmi
+        # lesquels ce budget est distribué (par ordre de suspicion, voir le
+        # tri de active_in_db ci-dessus), pas le nombre de vérifications
+        # réellement effectuées.
+        #
+        # Priorité 1 : page HTML item (is_closed dans JSON embarqué, sans auth)
+        # sale_confirmed=True seulement si Vinted a explicitement confirmé la
+        # vente (is_closed/can_be_sold) — une simple disparition (404, absences
+        # répétées, absente du catalogue vendeur) reste non confirmée : elle
+        # peut être une suppression, pas une vente.
+        item_gone = False
+        sale_confirmed = False
+        if verify_budget > 0:
+            html_gone, html_confirmed = _check_item_sold_via_html(row.vinted_id)
+            verify_budget -= 1
+            if html_gone is False:
+                # Item encore actif → reset absences
+                db.execute(
+                    text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
+                    {"lid": row.id},
+                )
+                continue
+            if html_gone is True:
+                item_gone = True
+                sale_confirmed = html_confirmed
+            else:
+                # html_gone=None → erreur réseau, fallback catalog
+                item_still_active = None
+                if verify_budget > 0:
+                    item_still_active = _check_seller_still_has_item(
+                        row.vinted_id, row.seller_id, row.title or ""
+                    )
+                    verify_budget -= 1
+                if item_still_active is True:
+                    db.execute(
+                        text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
+                        {"lid": row.id},
+                    )
+                    continue
+                # Absence du catalogue vendeur ou seuil d'absences atteint :
+                # gone, mais jamais confirmé comme vente.
+                item_gone = (item_still_active is False) or (new_absences >= 8)
+                sale_confirmed = False
+        else:
+            # Budget épuisé → fallback absences uniquement, non confirmé
+            item_gone = new_absences >= 8
+            sale_confirmed = False
+
+        if item_gone:
+            first_seen = row.first_seen_at
+            if first_seen and first_seen.tzinfo is None:
+                first_seen = first_seen.replace(tzinfo=timezone.utc)
+            life_hours = (
+                (now_utc - first_seen).total_seconds() / 3600
+                if first_seen else None
+            )
+            db.execute(
                 text(
                     """
                     UPDATE listings
-                    SET consecutive_absences = consecutive_absences + 1
+                    SET is_sold = true,
+                        disappeared_at = :now,
+                        time_to_disappear_hours = :life_h,
+                        final_price = :price,
+                        sale_confirmed = :confirmed
                     WHERE id = :lid
-                    RETURNING consecutive_absences, first_seen_at, price
                     """
                 ),
-                {"lid": row.id},
-            ).fetchone()
-
-            if updated and updated.consecutive_absences >= 4:
-                # Priorité 1 : page HTML item (is_closed dans JSON embarqué, sans auth)
-                # sale_confirmed=True seulement si Vinted a explicitement confirmé la
-                # vente (is_closed/can_be_sold) — une simple disparition (404, absences
-                # répétées, absente du catalogue vendeur) reste non confirmée : elle
-                # peut être une suppression, pas une vente.
-                item_gone = False
-                sale_confirmed = False
-                if verify_budget > 0:
-                    html_gone, html_confirmed = _check_item_sold_via_html(row.vinted_id)
-                    verify_budget -= 1
-                    if html_gone is False:
-                        # Item encore actif → reset absences
-                        db.execute(
-                            text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
-                            {"lid": row.id},
-                        )
-                        continue
-                    if html_gone is True:
-                        item_gone = True
-                        sale_confirmed = html_confirmed
-                    else:
-                        # html_gone=None → erreur réseau, fallback catalog
-                        item_still_active = None
-                        if verify_budget > 0:
-                            item_still_active = _check_seller_still_has_item(
-                                row.vinted_id, row.seller_id, row.title or ""
-                            )
-                            verify_budget -= 1
-                        if item_still_active is True:
-                            db.execute(
-                                text("UPDATE listings SET consecutive_absences = 0 WHERE id = :lid"),
-                                {"lid": row.id},
-                            )
-                            continue
-                        # Absence du catalogue vendeur ou seuil d'absences atteint :
-                        # gone, mais jamais confirmé comme vente.
-                        item_gone = (item_still_active is False) or (updated.consecutive_absences >= 8)
-                        sale_confirmed = False
-                else:
-                    # Budget épuisé → fallback absences uniquement, non confirmé
-                    item_gone = updated.consecutive_absences >= 8
-                    sale_confirmed = False
-
-                if item_gone:
-                    first_seen = updated.first_seen_at
-                    if first_seen and first_seen.tzinfo is None:
-                        first_seen = first_seen.replace(tzinfo=timezone.utc)
-                    life_hours = (
-                        (now_utc - first_seen).total_seconds() / 3600
-                        if first_seen else None
-                    )
-                    db.execute(
-                        text(
-                            """
-                            UPDATE listings
-                            SET is_sold = true,
-                                disappeared_at = :now,
-                                time_to_disappear_hours = :life_h,
-                                final_price = :price,
-                                sale_confirmed = :confirmed
-                            WHERE id = :lid
-                            """
-                        ),
-                        {"now": now_utc, "life_h": life_hours,
-                         "price": updated.price, "lid": row.id,
-                         "confirmed": sale_confirmed},
-                    )
-                    disappeared_count += 1
+                {"now": now_utc, "life_h": life_hours,
+                 "price": row.price, "lid": row.id,
+                 "confirmed": sale_confirmed},
+            )
+            disappeared_count += 1
 
     db.commit()
 
