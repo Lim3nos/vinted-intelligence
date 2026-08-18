@@ -870,7 +870,7 @@ _BRACKET_SATURATION_THRESHOLD = 900  # même valeur que target_per_bracket ci-de
 
 def _fetch_bracket_recursive(
     scraper_params: dict, lo: float, hi: float, split_budget: dict,
-    depth: int = 0, max_depth: int = 3,
+    depth: int = 0, max_depth: int = 1,
 ) -> Optional[list]:
     """
     Récupère une tranche de prix (voir _compute_price_brackets), et la
@@ -1032,9 +1032,14 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     seen_ids: set = set()
     any_bracket_succeeded = False
     # Budget partagé de sous-requêtes pour le redécoupage adaptatif (voir
-    # _fetch_bracket_recursive) — 2 par tranche initiale, plafonné à 12 pour
-    # borner le coût réseau même sur une recherche à volume très déséquilibré.
-    split_budget = {"remaining": min(12, len(brackets) * 2)}
+    # _fetch_bracket_recursive) — délibérément réduit (1 par tranche initiale,
+    # plafonné à 3) suite au blocage Cloudflare du 06/08 sur l'IP Railway,
+    # probablement déclenché par le volume de requêtes cumulé du découpage
+    # par tranches (commit e971461) + ce redécoupage adaptatif. En attendant
+    # la levée du blocage, on limite volontairement la casse plutôt que de
+    # maximiser la couverture — quitte à laisser quelques tranches saturées
+    # non affinées le temps que la situation se stabilise.
+    split_budget = {"remaining": min(3, len(brackets))}
     for i, (lo, hi) in enumerate(brackets):
         bracket_items = _fetch_bracket_recursive(scraper_params, lo, hi, split_budget)
         if bracket_items is None:
