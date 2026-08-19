@@ -232,6 +232,63 @@ def keyword_set_matches(title_normalized: str, kw_set: list, item_brand: Optiona
     return all(kw in title_words for kw in kw_set)
 
 
+def build_model_keyword_sets(models: list, brand_hint: Optional[str] = None) -> list:
+    """
+    Précalcule les jeux de mots-clés (voir build_keyword_sets) de chaque
+    modèle UNE SEULE FOIS — à utiliser avant une boucle sur des annonces,
+    plutôt que de laisser match_model()/build_keyword_sets() les reconstruire
+    à chaque annonce pour chaque modèle.
+
+    Le résultat de build_keyword_sets ne dépend que de keywords_rules/
+    search_variants/brand_hint d'un modèle donné — identique pour toutes les
+    annonces d'un même snapshot. Sans précalcul, ce coût (parsing JSON,
+    tokenisation regex, canonicalisation) est payé O(items × modèles) au lieu
+    de O(modèles) : négligeable sur quelques dizaines d'annonces, mais devenu
+    le principal goulot d'étranglement mesuré en prod sur une grosse recherche
+    (20 000+ annonces à chaque cycle, depuis le découpage par tranches de
+    prix) — le run_snapshot correspondant tournait des heures sans avancer,
+    tout le temps CPU passé à recalculer inutilement les mêmes jeux de
+    mots-clés annonce après annonce.
+
+    Retourne une liste de (model_id, keyword_sets).
+    """
+    return [
+        (
+            m.id,
+            build_keyword_sets(
+                getattr(m, "keywords_rules", None),
+                getattr(m, "search_variants", None),
+                brand_hint=brand_hint,
+            ),
+        )
+        for m in models
+    ]
+
+
+def match_model_precomputed(
+    title_normalized: str,
+    precomputed_sets: list,
+    item_brand: Optional[str] = None,
+) -> Optional[int]:
+    """
+    Comme match_model(), mais reçoit des jeux de mots-clés déjà calculés (voir
+    build_model_keyword_sets) au lieu de les reconstruire pour cette annonce —
+    mêmes règles de matching (OR de groupes ET, le plus spécifique gagne),
+    juste sans le recalcul redondant. À utiliser dans toute boucle sur
+    plusieurs annonces d'un même lot de modèles.
+    """
+    best_id: Optional[int] = None
+    best_count = 0
+
+    for model_id, keyword_sets in precomputed_sets:
+        for kw_set in keyword_sets:
+            if keyword_set_matches(title_normalized, kw_set, item_brand=item_brand) and len(kw_set) > best_count:
+                best_count = len(kw_set)
+                best_id = model_id
+
+    return best_id
+
+
 def match_model(
     title_normalized: str,
     models: list,
@@ -252,19 +309,12 @@ def match_model(
     ne relâche jamais le ET strict du matching lui-même.
     `item_brand` : marque Vinted confirmée de cette annonce précise (voir
     keyword_set_matches) — comble le mot-clé de marque si absent du titre.
+
+    Pratique pour un match ponctuel (un seul appel). Pour matcher plusieurs
+    annonces contre le même jeu de modèles, précalculer une fois avec
+    build_model_keyword_sets() et appeler match_model_precomputed() en boucle
+    — voir le commentaire de build_model_keyword_sets pour le coût évité.
     """
-    best_id: Optional[int] = None
-    best_count = 0
-
-    for m in models:
-        keyword_sets = build_keyword_sets(
-            getattr(m, "keywords_rules", None),
-            getattr(m, "search_variants", None),
-            brand_hint=brand_hint,
-        )
-        for kw_set in keyword_sets:
-            if keyword_set_matches(title_normalized, kw_set, item_brand=item_brand) and len(kw_set) > best_count:
-                best_count = len(kw_set)
-                best_id = m.id
-
-    return best_id
+    return match_model_precomputed(
+        title_normalized, build_model_keyword_sets(models, brand_hint), item_brand=item_brand
+    )

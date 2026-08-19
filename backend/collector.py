@@ -20,7 +20,7 @@ from sqlalchemy import text
 from curl_cffi.requests import Session as CurlSession
 
 from logger import log_to_db
-from keywords import match_model
+from keywords import build_model_keyword_sets, match_model_precomputed
 
 logger = logging.getLogger("vinted.collector")
 
@@ -980,6 +980,12 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
     # les variantes trop génériques dans build_keyword_sets (voir keywords.py)
     brand_hint = search.name.strip().lower() if search.search_type == "brand" and search.name else None
 
+    # Précalculé UNE FOIS pour toute la recherche, pas par annonce (voir
+    # keywords.py::build_model_keyword_sets) — sur une grosse recherche
+    # (20 000+ annonces), recalculer ces jeux de mots-clés à chaque annonce
+    # pour chaque modèle était le principal goulot d'étranglement du cycle.
+    model_keyword_sets = build_model_keyword_sets(active_models, brand_hint)
+
     # 2. Construire les paramètres de scraping
     # IMPORTANT : les filtres Vinted à valeurs multiples (brand_ids, catalog_ids,
     # status_ids, size_ids, color_ids...) doivent être envoyés au format tableau
@@ -1141,9 +1147,10 @@ async def run_snapshot(search_id: int, db: Session) -> dict:
 
             # Matching vers un product_model (item_brand=marque confirmée par
             # Vinted — comble le mot-clé de marque quand le vendeur ne l'a pas
-            # retapé dans le titre, voir keywords.py::keyword_set_matches)
-            matched_model_id = match_model(
-                title_norm, active_models, brand_hint=brand_hint, item_brand=brand_name
+            # retapé dans le titre, voir keywords.py::keyword_set_matches).
+            # Jeux de mots-clés précalculés une fois avant la boucle (model_keyword_sets).
+            matched_model_id = match_model_precomputed(
+                title_norm, model_keyword_sets, item_brand=brand_name
             )
 
             if not existing:
