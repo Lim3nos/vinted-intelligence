@@ -231,13 +231,23 @@ def run_variant_snapshots(db_session_factory):
         db.close()
 
 
-def run_stale_refresh(db_session_factory, limit: int = 100):
+def run_stale_refresh(db_session_factory, limit: int = 300):
     """
     Revisite individuellement les annonces actives (suivies ou non) qui n'ont
     pas été revues depuis plus de 2h — voir collector.py::refresh_stale_listings
     pour le détail. Extrait en fonction de module pour être appelable à la fois
     par le job APScheduler (toutes les 20 min) et par
     POST /api/admin/refresh-stale-listings (déclenchement manuel).
+
+    limit relevé de 100 à 300 (19/08) : la couverture élargie du scan
+    principal (découpage par tranches de prix, voir collector.py) a fait
+    exploser le volume de comptes réellement actifs, et donc le nombre
+    d'annonces éligibles à ce rattrapage (162 000+ constaté en prod, pour
+    ~7 200/jour traitées à l'ancien débit — plus de 3 semaines pour vider le
+    retard). Chaque vérification est une requête légère (page d'annonce
+    individuelle), pas un scan catalogue lourd — le run observé juste après
+    la reprise du blocage Cloudflare du 06/08 tournait déjà sans souci à ce
+    rythme sur 20 min.
     """
     from collector import refresh_stale_listings
 
