@@ -125,6 +125,38 @@ async def lifespan(app: FastAPI):
         _db_mig.rollback()
         log_to_db("ERROR", "api", f"Migration keywords_rules echouee : {e}")
 
+    # Nettoyage des jobs "running" orphelins — un job d'exploration lancé via
+    # BackgroundTasks (voir jobs.py) ne survit pas au remplacement du conteneur
+    # lors d'un déploiement : le processus qui devait le terminer disparaît,
+    # sans jamais mettre à jour son statut, qui reste bloqué à "running" pour
+    # toujours (constaté en prod le 19/08 — un job resté "running" indéfiniment
+    # après un déploiement survenu pile pendant son exécution). Au redémarrage,
+    # aucun job "running" en base ne peut légitimement appartenir à CE
+    # processus (qui vient de démarrer) — ils sont donc tous orphelins.
+    try:
+        _orphaned = _db_mig.execute(
+            text(
+                """
+                UPDATE async_jobs
+                SET status = 'failed',
+                    error_message = 'Interrompu par un redémarrage du serveur — relancer le job',
+                    completed_at = NOW()
+                WHERE status = 'running'
+                RETURNING id
+                """
+            )
+        ).fetchall()
+        _db_mig.commit()
+        if _orphaned:
+            log_to_db(
+                "WARNING", "api",
+                f"{len(_orphaned)} job(s) orphelin(s) marqué(s) échoués au démarrage",
+                {"job_ids": [str(r.id) for r in _orphaned]},
+            )
+    except Exception as e:
+        _db_mig.rollback()
+        log_to_db("ERROR", "api", f"Nettoyage jobs orphelins echoue : {e}")
+
     _db_mig.close()
 
     from scheduler import setup_scheduler
